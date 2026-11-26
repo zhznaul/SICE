@@ -88,11 +88,12 @@ try {
             }
             $name = post_text('name');
             $email = strtolower(post_text('email', 254));
-            $password = post_text('password', 128);
+            $passwordRaw = $_POST['password'] ?? '';
+            $password = is_string($passwordRaw) ? mb_substr($passwordRaw, 0, 128) : '';
             $role = post_text('role');
             $fn = post_text('function');
 
-            if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || mb_strlen($password) < 4 || !in_array($role, ['storekeeper', 'operational'], true)) {
+            if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || mb_strlen(trim($password)) < 4 || !in_array($role, ['storekeeper', 'operational'], true)) {
                 respond(['ok' => false, 'error' => 'Revise nome, e-mail, função, perfil e senha.']);
             }
 
@@ -122,11 +123,22 @@ try {
             $name = post_text('name');
             $email = strtolower(post_text('email', 254));
             $fn = post_text('function');
-            $active = post_text('active') === 'true' ? 1 : 0;
-            $password = post_text('password', 128);
+            $active = in_array(post_text('active'), ['true', '1', 'on'], true) ? 1 : 0;
+            $passwordRaw = $_POST['password'] ?? '';
+            $password = is_string($passwordRaw) ? mb_substr($passwordRaw, 0, 128) : '';
 
             if ($empId <= 0 || !in_array($role, ['storekeeper', 'operational'], true) || $name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-                respond(['ok' => false, 'error' => 'Selecione um perfil válido.']);
+                respond(['ok' => false, 'error' => 'Revise nome, e-mail e perfil do funcionário.']);
+            }
+
+            $targetStmt = $pdo->prepare('SELECT id, role FROM users WHERE id = :id LIMIT 1');
+            $targetStmt->execute([':id' => $empId]);
+            $targetUser = $targetStmt->fetch();
+            if (!$targetUser) {
+                respond(['ok' => false, 'error' => 'Funcionário não encontrado.']);
+            }
+            if ((string) $targetUser['role'] === 'owner') {
+                respond(['ok' => false, 'error' => 'Não é possível alterar o perfil do proprietário nesta tela.'], 403);
             }
 
             if ($password !== '') {
@@ -134,10 +146,10 @@ try {
                     respond(['ok' => false, 'error' => 'A nova senha deve ter pelo menos 4 caracteres.']);
                 }
                 $stmt = $pdo->prepare(
-                    'UPDATE users
+                    "UPDATE users
                      SET name = :name, email = :email, role = :role, function_title = :fn,
                          active = :active, password_hash = :hash
-                     WHERE id = :id AND role <> "owner"'
+                     WHERE id = :id AND role <> 'owner'"
                 );
                 $stmt->execute([
                     ':name'   => $name,
@@ -150,9 +162,9 @@ try {
                 ]);
             } else {
                 $stmt = $pdo->prepare(
-                    'UPDATE users
+                    "UPDATE users
                      SET name = :name, email = :email, role = :role, function_title = :fn, active = :active
-                     WHERE id = :id AND role <> "owner"'
+                     WHERE id = :id AND role <> 'owner'"
                 );
                 $stmt->execute([
                     ':name'   => $name,

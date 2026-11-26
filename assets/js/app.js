@@ -221,7 +221,10 @@
   }
 
   async function reloadState() {
-    const res = await fetch('api/state.php', { credentials: 'same-origin' });
+    const res = await fetch('api/state.php', {
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
     if (res.status === 401) {
       window.location.href = 'index.php';
       return;
@@ -1380,7 +1383,12 @@
               <p>O acesso será individual e respeitará o perfil escolhido.</p>
             </div>
           </div>
-          <form data-action="createEmployee">
+          <form data-action="createEmployee" autocomplete="off">
+            <datalist id="sice-function-options">
+              <option value="Cozinheiro"></option>
+              <option value="Bartender"></option>
+              <option value="Almoxarife"></option>
+            </datalist>
             <div class="form-grid">
               <label class="form-field">
                 <span>Nome</span>
@@ -1388,15 +1396,15 @@
               </label>
               <label class="form-field">
                 <span>Função</span>
-                <input name="function" required placeholder="Ex.: Cozinheiro, bartender...">
+                <input name="function" list="sice-function-options" required placeholder="Ex.: Cozinheiro, bartender...">
               </label>
               <label class="form-field">
                 <span>E-mail de login</span>
-                <input name="email" type="email" required>
+                <input name="email" type="email" autocomplete="off" required>
               </label>
               <label class="form-field">
                 <span>Senha inicial</span>
-                <input name="password" type="password" minlength="4" required>
+                <input name="password" type="password" minlength="4" autocomplete="new-password" required>
               </label>
               <label class="form-field full-width">
                 <span>Perfil de acesso</span>
@@ -1432,7 +1440,7 @@
                   ? `
                 <details class="record-editor">
                   <summary>Gerenciar acesso</summary>
-                  <form data-action="updateEmployee">
+                  <form data-action="updateEmployee" autocomplete="off">
                     <input type="hidden" name="id" value="${esc(member.id)}">
                     <div class="form-grid">
                       <label class="form-field">
@@ -1441,19 +1449,15 @@
                       </label>
                       <label class="form-field">
                         <span>Função</span>
-                        <select name="function">
-                          ${['Cozinheiro', 'Bartender', 'Almoxarife']
-                            .map((fn) => `<option ${(member.function || 'Cozinheiro') === fn ? 'selected' : ''}>${fn}</option>`)
-                            .join('')}
-                        </select>
+                        <input name="function" value="${esc(member.function || '')}" list="sice-function-options" placeholder="Ex.: Cozinheiro, bartender...">
                       </label>
                       <label class="form-field">
                         <span>E-mail</span>
-                        <input name="email" type="email" value="${esc(member.email)}" required>
+                        <input name="email" type="email" value="${esc(member.email)}" autocomplete="off" required>
                       </label>
                       <label class="form-field">
                         <span>Nova senha (opcional)</span>
-                        <input name="password" type="password" minlength="4">
+                        <input name="password" type="password" minlength="4" autocomplete="new-password" placeholder="Deixe em branco para manter">
                       </label>
                       <label class="form-field">
                         <span>Perfil</span>
@@ -1606,6 +1610,53 @@
     `;
   }
 
+  function loadScriptOnce(src) {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = src;
+      script.async = true;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error(`Falha ao carregar ${src}`));
+      document.head.appendChild(script);
+    });
+  }
+
+  async function ensureQrCodeLibrary() {
+    if (window.QRCode && typeof window.QRCode.toDataURL === 'function') {
+      return window.QRCode;
+    }
+    const fallbacks = [
+      'https://cdnjs.cloudflare.com/ajax/libs/qrcode/1.5.1/qrcode.min.js',
+      'https://unpkg.com/qrcode@1.5.1/build/qrcode.min.js',
+      'https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js',
+    ];
+    for (const url of fallbacks) {
+      try {
+        await loadScriptOnce(url);
+        if (window.QRCode && typeof window.QRCode.toDataURL === 'function') {
+          return window.QRCode;
+        }
+      } catch {
+        // Tenta o próximo CDN
+      }
+    }
+    return null;
+  }
+
+  function loadQrImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new window.Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Falha ao renderizar imagem do QR Code.'));
+      img.src = src;
+      if (typeof img.decode === 'function') {
+        img.decode().then(() => resolve(img)).catch(() => {
+          // Aguarda onload/onerror padrão caso decode() falhe
+        });
+      }
+    });
+  }
+
   async function generateLabelPreview() {
     const activeProducts = state.products.filter((p) => p.active !== false);
     const product = activeProducts.find((p) => String(p.id) === String(state.labelProductId));
@@ -1621,11 +1672,13 @@
       showToast('Preencha todos os campos para gerar a prévia.');
       return;
     }
-    if (new Date(state.labelExpiryDate).getTime() < new Date(state.labelHandledAt).getTime()) {
+    if (state.labelExpiryDate < state.labelHandledAt) {
       showToast('A validade não pode ser anterior à manipulação.');
       return;
     }
-    if (!window.QRCode) {
+
+    const qrLib = await ensureQrCodeLibrary();
+    if (!qrLib) {
       showToast('Biblioteca QRCode não carregada. Verifique a conexão com a internet.');
       return;
     }
@@ -1642,62 +1695,64 @@
       responsibleName: state.labelResponsibleName.trim(),
     };
 
-    const qrData = await window.QRCode.toDataURL(JSON.stringify(payload), {
-      errorCorrectionLevel: 'H',
-      width: 420,
-      margin: 1,
-    });
-    state.labelQr = qrData;
+    try {
+      const qrData = await qrLib.toDataURL(JSON.stringify(payload), {
+        errorCorrectionLevel: 'H',
+        width: 420,
+        margin: 1,
+      });
+      state.labelQr = qrData;
 
-    const displayQuantity = `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 3 }).format(Number(state.labelQuantity))} ${state.labelUnit}`;
-    const canvas = document.createElement('canvas');
-    canvas.width = 1350;
-    canvas.height = 900;
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      const qrImage = new window.Image();
-      qrImage.src = qrData;
-      await qrImage.decode();
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(qrImage, 55, 95, 500, 500);
-      ctx.fillStyle = '#111111';
-      ctx.textAlign = 'center';
-      ctx.font = '700 48px sans-serif';
-      ctx.fillText(product.code, 305, 670);
+      const displayQuantity = `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 3 }).format(Number(state.labelQuantity))} ${state.labelUnit}`;
+      const canvas = document.createElement('canvas');
+      canvas.width = 1350;
+      canvas.height = 900;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const qrImage = await loadQrImage(qrData);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(qrImage, 55, 95, 500, 500);
+        ctx.fillStyle = '#111111';
+        ctx.textAlign = 'center';
+        ctx.font = '700 48px sans-serif';
+        ctx.fillText(product.code, 305, 670);
 
-      ctx.textAlign = 'left';
-      ctx.font = '700 64px sans-serif';
-      ctx.fillText(product.name, 635, 130, 650);
-      ctx.font = '400 48px sans-serif';
-      ctx.fillText(`Quantidade: ${displayQuantity}`, 635, 220);
-      ctx.fillText(`Manip.: ${formatDate(state.labelHandledAt)}`, 635, 310);
-      ctx.font = '700 52px sans-serif';
-      ctx.fillText(`VAL.: ${formatDate(state.labelExpiryDate)}`, 635, 400);
-      ctx.font = '400 44px sans-serif';
-      ctx.fillText(`Lote: ${state.labelLot.trim()}`, 635, 490);
-      ctx.fillStyle = '#555555';
-      ctx.fillText(`Resp.: ${state.labelResponsibleName.trim()}`, 635, 575);
-      ctx.strokeStyle = '#d5d5d5';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(635, 690);
-      ctx.lineTo(1285, 690);
-      ctx.stroke();
-      ctx.fillStyle = '#102d24';
-      ctx.font = '700 58px sans-serif';
-      ctx.fillText('SICE', 635, 790);
-      ctx.fillStyle = '#6b746f';
-      ctx.font = '400 34px sans-serif';
-      ctx.fillText('Allto Al Mar · Controle de estoque', 805, 790);
-      state.labelPng = canvas.toDataURL('image/png');
-    }
+        ctx.textAlign = 'left';
+        ctx.font = '700 64px sans-serif';
+        ctx.fillText(product.name, 635, 130, 650);
+        ctx.font = '400 48px sans-serif';
+        ctx.fillText(`Quantidade: ${displayQuantity}`, 635, 220);
+        ctx.fillText(`Manip.: ${formatDate(state.labelHandledAt)}`, 635, 310);
+        ctx.font = '700 52px sans-serif';
+        ctx.fillText(`VAL.: ${formatDate(state.labelExpiryDate)}`, 635, 400);
+        ctx.font = '400 44px sans-serif';
+        ctx.fillText(`Lote: ${state.labelLot.trim()}`, 635, 490);
+        ctx.fillStyle = '#555555';
+        ctx.fillText(`Resp.: ${state.labelResponsibleName.trim()}`, 635, 575);
+        ctx.strokeStyle = '#d5d5d5';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(635, 690);
+        ctx.lineTo(1285, 690);
+        ctx.stroke();
+        ctx.fillStyle = '#102d24';
+        ctx.font = '700 58px sans-serif';
+        ctx.fillText('SICE', 635, 790);
+        ctx.fillStyle = '#6b746f';
+        ctx.font = '400 34px sans-serif';
+        ctx.fillText('Allto Al Mar · Controle de estoque', 805, 790);
+        state.labelPng = canvas.toDataURL('image/png');
+      }
 
-    const preview = document.getElementById('label-preview-card');
-    if (preview) {
-      preview.innerHTML = labelPreviewInnerHtml(product, displayQuantity);
-      refreshIcons();
+      const preview = document.getElementById('label-preview-card');
+      if (preview) {
+        preview.innerHTML = labelPreviewInnerHtml(product, displayQuantity);
+        refreshIcons();
+      }
+    } catch {
+      showToast('Não foi possível gerar a imagem do QR Code.');
     }
   }
 
@@ -2629,6 +2684,8 @@
     if (el.hasAttribute('data-label-field')) {
       const key = el.getAttribute('data-label-field');
       state[key] = el.value;
+      state.labelQr = '';
+      state.labelPng = '';
       if (key === 'labelHandledAt') {
         const expInput = document.querySelector('input[name="expiryDate"][data-label-field]');
         if (expInput) expInput.min = el.value || '';
@@ -2686,6 +2743,8 @@
     if (el.hasAttribute('data-label-field')) {
       const key = el.getAttribute('data-label-field');
       state[key] = el.value;
+      state.labelQr = '';
+      state.labelPng = '';
       const activeProducts = state.products.filter((p) => p.active !== false);
       const product = activeProducts.find((p) => String(p.id) === String(state.labelProductId));
       const displayQuantity = state.labelQuantity
@@ -2723,14 +2782,18 @@
         state.labelExpiryDate = '';
         state.labelLot = '';
         state.labelResponsibleName = '';
+        state.labelQr = '';
+        state.labelPng = '';
       }
-    } else if (submitBtn) {
+    }
+
+    await handleActionResult(result);
+
+    if (submitBtn && submitBtn.isConnected) {
       submitBtn.disabled = false;
       submitBtn.innerHTML = originalHtml;
       refreshIcons();
     }
-
-    await handleActionResult(result);
   });
 
   // Inicialização

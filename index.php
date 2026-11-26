@@ -48,7 +48,7 @@ $stateJson = json_encode(
 
   <script id="sice-initial-state" type="application/json"><?= $stateJson ?></script>
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
   <script src="assets/js/app.js"></script>
 </body>
 </html>
