@@ -12,11 +12,11 @@ function db(): PDO
         return $pdo;
     }
 
-    $host = getenv('DB_HOST') ?: '127.0.0.1';
-    $port = getenv('DB_PORT') ?: '3306';
+    $host = getenv('DB_HOST') ?: 'db.fr-roub1.bengt.wasmernet.com';
+    $port = getenv('DB_PORT') ?: '20184';
     $name = getenv('DB_NAME') ?: 'sice_db';
-    $user = getenv('DB_USER') ?: 'root';
-    $pass = getenv('DB_PASS') !== false ? (string) getenv('DB_PASS') : '';
+    $user = getenv('DB_USER') ?: 'user_bb3031b6';
+    $pass = getenv('DB_PASS') !== false ? (string) getenv('DB_PASS') : 'pw_JpC93SUSloQH09tye1cwlVzlv8GQkDei';
 
     $dsn = sprintf('mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4', $host, $port, $name);
 
