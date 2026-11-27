@@ -5892,3 +5892,59 @@ body {
     width: 100%;
   }
 }
+
+/* ===========================================================================
+   NAVEGAÇÃO MOBILE: Rolagem touch na sidebar + bloqueio do fundo (Android/iOS)
+   =========================================================================== */
+html.body-scroll-locked {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+body.body-scroll-locked {
+  position: fixed;
+  left: 0;
+  right: 0;
+  width: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+@media (max-width: 760px) {
+  .menu-backdrop {
+    z-index: 55;
+    touch-action: none;
+    overscroll-behavior: none;
+  }
+  .sidebar {
+    z-index: 60;
+    height: 100vh;
+    height: 100svh;
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+    padding-bottom: max(28px, calc(env(safe-area-inset-bottom) + 22px));
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform 0.25s ease, visibility 0.25s ease;
+  }
+  .sidebar.sidebar--open {
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateX(0);
+  }
+  .sidebar .sidebar-top,
+  .sidebar .restaurant-card,
+  .sidebar .user-card {
+    flex-shrink: 0;
+  }
+  .sidebar .main-nav {
+    flex: 1 0 auto;
+  }
+  .sidebar .user-card {
+    margin-top: 16px;
+  }
+}
