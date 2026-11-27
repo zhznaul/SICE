@@ -617,7 +617,7 @@
         <button class="metric-card metric-card--interactive" type="button" data-overview-card="low-stock">
           <div class="metric-head">
             <div class="metric-icon metric-icon--amber">
-              ${icon('alert-triangle', 21)}
+              ${icon('triangle-alert', 21)}
             </div>
             <span class="metric-card-link">Ver registros ${icon('arrow-right', 14)}</span>
           </div>
@@ -893,16 +893,16 @@
       )}
       <section class="alert-summary">
         <button class="${isExpiry ? 'active' : ''}" type="button" data-alert-filter="expiry" aria-pressed="${isExpiry}">
-          <span class="alert-summary-icon expiry">${icon('clock-3', 21)}</span>
-          <div>
+          <span class="alert-summary-icon expiry" aria-hidden="true">${icon('calendar-clock', 24)}</span>
+          <div class="alert-summary-copy">
             <span>Próximos do vencimento</span>
             <strong>${expiryAlerts.length}</strong>
             <small>prioridade PVPS</small>
           </div>
         </button>
         <button class="${!isExpiry ? 'active' : ''}" type="button" data-alert-filter="stock" aria-pressed="${!isExpiry}">
-          <span class="alert-summary-icon stock">${icon('alert-triangle', 21)}</span>
-          <div>
+          <span class="alert-summary-icon stock" aria-hidden="true">${icon('triangle-alert', 24)}</span>
+          <div class="alert-summary-copy">
             <span>Abaixo do mínimo</span>
             <strong>${stockAlerts.length}</strong>
             <small>reposição recomendada</small>
@@ -948,8 +948,8 @@
               .map(
                 (n) => `
               <article>
-                <span class="alert-history-icon ${esc(n.type)}">
-                  ${icon(n.type === 'expiry' ? 'clock-3' : 'alert-triangle', 17)}
+                <span class="alert-history-icon ${esc(n.type)}" aria-hidden="true">
+                  ${icon(n.type === 'expiry' ? 'calendar-clock' : 'triangle-alert', 19)}
                 </span>
                 <div>
                   <strong>${esc(n.title)}</strong>
@@ -1747,7 +1747,127 @@
     `;
   }
 
+  function estimateLabelTitleFontSize(name) {
+    const len = String(name || '').trim().length;
+    if (len <= 16) return 34;
+    if (len <= 24) return 28;
+    if (len <= 34) return 24;
+    if (len <= 48) return 20;
+    if (len <= 68) return 17;
+    return 14;
+  }
+
+  function fitLabelTitle() {
+    const label = document.querySelector('.print-label');
+    const info = label ? label.querySelector('.label-information') : null;
+    const title = info ? info.querySelector('.label-product-title') : null;
+    if (!label || !info || !title) return;
+
+    const labelWidth = label.clientWidth || 560;
+    const labelHeight = label.clientHeight || Math.round(labelWidth / 1.5);
+    const maxFont = Math.min(38, Math.max(18, Math.round(labelWidth * 0.068)));
+    const minFont = 10;
+    const maxTitleHeight = Math.max(36, Math.round(labelHeight * 0.28));
+
+    let size = Math.min(maxFont, estimateLabelTitleFontSize(title.textContent) + 6);
+    title.style.fontSize = `${size}px`;
+
+    // Ajusta dinamicamente até caber sem corte horizontal nem sobreposição vertical
+    const fits = () => {
+      const noHorizontalOverflow = title.scrollWidth <= title.clientWidth + 1;
+      const titleHeightOk = title.scrollHeight <= maxTitleHeight + 1;
+      const infoFitsInsideLabel = info.scrollHeight <= info.clientHeight + 2;
+      return noHorizontalOverflow && titleHeightOk && infoFitsInsideLabel;
+    };
+
+    // Tenta crescer até o máximo se couber com folga (para nomes curtos)
+    while (size < maxFont) {
+      const next = size + 1;
+      title.style.fontSize = `${next}px`;
+      if (!fits()) {
+        title.style.fontSize = `${size}px`;
+        break;
+      }
+      size = next;
+    }
+
+    // Reduz progressivamente até caber integralmente sem cortes ou sobreposições
+    while (size > minFont && !fits()) {
+      size -= 1;
+      title.style.fontSize = `${size}px`;
+    }
+  }
+
+  function wrapCanvasText(ctx, text, maxWidth) {
+    const cleaned = String(text || '').trim().replace(/\s+/g, ' ');
+    if (!cleaned) return [''];
+    const words = cleaned.split(' ');
+    const lines = [];
+    let current = '';
+
+    const pushLongWord = (word) => {
+      let chunk = '';
+      for (const ch of word) {
+        if (ctx.measureText(chunk + ch).width > maxWidth && chunk) {
+          lines.push(chunk);
+          chunk = ch;
+        } else {
+          chunk += ch;
+        }
+      }
+      if (chunk) current = chunk;
+    };
+
+    for (const word of words) {
+      const test = current ? `${current} ${word}` : word;
+      if (ctx.measureText(test).width <= maxWidth) {
+        current = test;
+      } else if (!current) {
+        pushLongWord(word);
+      } else {
+        lines.push(current);
+        current = '';
+        if (ctx.measureText(word).width <= maxWidth) {
+          current = word;
+        } else {
+          pushLongWord(word);
+        }
+      }
+    }
+    if (current) lines.push(current);
+    return lines;
+  }
+
+  function drawFittedCanvasTitle(ctx, text, x, topY, maxWidth, maxHeight) {
+    let fontSize = 64;
+    const minFontSize = 22;
+    let lines = [text];
+    let lineHeight = fontSize * 1.08;
+
+    while (fontSize >= minFontSize) {
+      ctx.font = `700 ${fontSize}px sans-serif`;
+      lines = wrapCanvasText(ctx, text, maxWidth);
+      lineHeight = Math.round(fontSize * 1.1);
+      const totalHeight = lines.length * lineHeight;
+      const allLinesFitWidth = lines.every((line) => ctx.measureText(line).width <= maxWidth + 1);
+      if (allLinesFitWidth && totalHeight <= maxHeight) {
+        break;
+      }
+      fontSize -= 2;
+    }
+
+    ctx.font = `700 ${Math.max(fontSize, minFontSize)}px sans-serif`;
+    const totalHeight = lines.length * lineHeight;
+    const startY = topY + Math.max(0, Math.round((maxHeight - totalHeight) / 2)) + Math.round(fontSize * 0.82);
+
+    lines.forEach((line, idx) => {
+      ctx.fillText(line, x, startY + idx * lineHeight);
+    });
+  }
+
   function labelPreviewInnerHtml(product, displayQuantity) {
+    const productName = product?.name || 'Nome do insumo';
+    const initialTitleSize = estimateLabelTitleFontSize(productName);
     return `
       <div class="preview-title">
         <span>PRÉVIA DE IMPRESSÃO</span>
@@ -1763,7 +1883,7 @@
           <strong>${esc(product?.code || 'CÓDIGO')}</strong>
         </div>
         <div class="label-information">
-          <h3>${esc(product?.name || 'Nome do insumo')}</h3>
+          <h3 class="label-product-title" style="font-size: ${initialTitleSize}px" title="${esc(productName)}">${esc(productName)}</h3>
           <p>Quantidade: <strong>${esc(displayQuantity)}</strong></p>
           <p>Manip.: <strong>${esc(formatDate(state.labelHandledAt))}</strong></p>
           <p class="label-expiry">VAL.: <strong>${esc(formatDate(state.labelExpiryDate))}</strong></p>
@@ -1897,17 +2017,17 @@
         ctx.fillText(product.code, 305, 670);
 
         ctx.textAlign = 'left';
-        ctx.font = '700 64px sans-serif';
-        ctx.fillText(product.name, 635, 130, 650);
+        ctx.fillStyle = '#111111';
+        drawFittedCanvasTitle(ctx, product.name, 635, 58, 650, 128);
         ctx.font = '400 48px sans-serif';
-        ctx.fillText(`Quantidade: ${displayQuantity}`, 635, 220);
-        ctx.fillText(`Manip.: ${formatDate(state.labelHandledAt)}`, 635, 310);
+        ctx.fillText(`Quantidade: ${displayQuantity}`, 635, 240);
+        ctx.fillText(`Manip.: ${formatDate(state.labelHandledAt)}`, 635, 325);
         ctx.font = '700 52px sans-serif';
-        ctx.fillText(`VAL.: ${formatDate(state.labelExpiryDate)}`, 635, 400);
+        ctx.fillText(`VAL.: ${formatDate(state.labelExpiryDate)}`, 635, 415);
         ctx.font = '400 44px sans-serif';
-        ctx.fillText(`Lote: ${state.labelLot.trim()}`, 635, 490);
+        ctx.fillText(`Lote: ${state.labelLot.trim()}`, 635, 500);
         ctx.fillStyle = '#555555';
-        ctx.fillText(`Resp.: ${state.labelResponsibleName.trim()}`, 635, 575);
+        ctx.fillText(`Resp.: ${state.labelResponsibleName.trim()}`, 635, 580);
         ctx.strokeStyle = '#d5d5d5';
         ctx.lineWidth = 3;
         ctx.beginPath();
@@ -1927,6 +2047,7 @@
       if (preview) {
         preview.innerHTML = labelPreviewInnerHtml(product, displayQuantity);
         refreshIcons();
+        fitLabelTitle();
       }
     } catch {
       showToast('Não foi possível gerar a imagem do QR Code.');
@@ -2933,6 +3054,12 @@
     `;
 
     refreshIcons();
+    if (state.active === 'Etiquetas') {
+      fitLabelTitle();
+      if (typeof window.requestAnimationFrame === 'function') {
+        window.requestAnimationFrame(fitLabelTitle);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -3155,6 +3282,7 @@
       if (preview) {
         preview.innerHTML = labelPreviewInnerHtml(product, displayQuantity);
         refreshIcons();
+        fitLabelTitle();
       }
     }
   });
@@ -3231,6 +3359,7 @@
       if (preview) {
         preview.innerHTML = labelPreviewInnerHtml(product, displayQuantity);
         refreshIcons();
+        fitLabelTitle();
       }
     }
   });
@@ -3282,6 +3411,30 @@
       refreshIcons();
     }
   });
+
+  if (typeof window.addEventListener === 'function') {
+    let resizeRaf = null;
+    window.addEventListener('resize', () => {
+      if (state.active !== 'Etiquetas') return;
+      if (typeof window.requestAnimationFrame === 'function') {
+        if (resizeRaf !== null) window.cancelAnimationFrame(resizeRaf);
+        resizeRaf = window.requestAnimationFrame(() => {
+          resizeRaf = null;
+          fitLabelTitle();
+        });
+      } else {
+        fitLabelTitle();
+      }
+    });
+    window.addEventListener('beforeprint', () => {
+      if (state.active === 'Etiquetas') fitLabelTitle();
+    });
+  }
+  if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === 'function') {
+    document.fonts.ready.then(() => {
+      if (state.active === 'Etiquetas') fitLabelTitle();
+    });
+  }
 
   // Inicialização
   render();
