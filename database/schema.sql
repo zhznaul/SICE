@@ -167,6 +167,25 @@ CREATE TABLE IF NOT EXISTS `purchase_receipts` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
+-- 7. Chamados de ajuda e suporte
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `support_tickets` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id` INT UNSIGNED NOT NULL,
+  `subject` VARCHAR(180) NOT NULL,
+  `description` TEXT NOT NULL,
+  `attachments_json` TEXT DEFAULT NULL,
+  `status` ENUM('open', 'in_progress', 'resolved') NOT NULL DEFAULT 'open',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_support_tickets_user` (`user_id`),
+  KEY `idx_support_tickets_created_at` (`created_at`),
+  CONSTRAINT `fk_support_tickets_user`
+    FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+    ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
 -- Dados iniciais (Seed) - Senha padrão de todos os usuários de teste: password
 -- ---------------------------------------------------------------------------
 INSERT IGNORE INTO `users` (`id`, `name`, `email`, `password_hash`, `role`, `function_title`, `active`) VALUES

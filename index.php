@@ -5,12 +5,13 @@ require_once __DIR__ . '/config/auth.php';
 
 $dbError = null;
 $initialState = [
-    'user'      => null,
-    'products'  => [],
-    'movements' => [],
-    'receipts'  => [],
-    'orders'    => [],
-    'team'      => [],
+    'user'           => null,
+    'products'       => [],
+    'movements'      => [],
+    'receipts'       => [],
+    'orders'         => [],
+    'team'           => [],
+    'supportTickets' => [],
 ];
 
 try {
@@ -35,6 +36,16 @@ $stateJson = json_encode(
   <title>SICE · Sistema Inteligente de Controle de Estoque</title>
   <meta name="description" content="Controle insumos, reduza perdas e acompanhe o CMV da sua operação em tempo real.">
   <link rel="icon" type="image/svg+xml" href="assets/img/favicon.svg">
+  <script>
+    (function () {
+      try {
+        var savedTheme = localStorage.getItem('sice_theme');
+        if (savedTheme === 'dark' || savedTheme === 'light') {
+          document.documentElement.dataset.theme = savedTheme;
+        }
+      } catch (e) {}
+    })();
+  </script>
   <link rel="stylesheet" href="assets/css/styles.css">
 </head>
 <body>

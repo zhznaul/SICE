@@ -145,6 +145,30 @@ function is_manager(array $user): bool
 }
 
 /**
+ * Garante que a tabela de chamados de suporte exista mesmo em bancos já importados.
+ */
+function ensure_support_tickets_table(PDO $pdo): void
+{
+    $pdo->exec(
+        'CREATE TABLE IF NOT EXISTS `support_tickets` (
+          `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+          `user_id` INT UNSIGNED NOT NULL,
+          `subject` VARCHAR(180) NOT NULL,
+          `description` TEXT NOT NULL,
+          `attachments_json` TEXT DEFAULT NULL,
+          `status` ENUM(\'open\', \'in_progress\', \'resolved\') NOT NULL DEFAULT \'open\',
+          `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (`id`),
+          KEY `idx_support_tickets_user` (`user_id`),
+          KEY `idx_support_tickets_created_at` (`created_at`),
+          CONSTRAINT `fk_support_tickets_user`
+            FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+            ON DELETE RESTRICT ON UPDATE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+    );
+}
+
+/**
  * Carrega todo o estado da aplicação de acordo com as permissões do perfil.
  */
 function fetch_app_state(array $user): array
@@ -289,12 +313,52 @@ function fetch_app_state(array $user): array
         }
     }
 
+    // 6. Chamados de suporte recentes do usuário
+    $supportTickets = [];
+    try {
+        $ticketStmt = $pdo->prepare(
+            'SELECT id, subject, description, attachments_json, status, created_at
+             FROM support_tickets
+             WHERE user_id = :uid
+             ORDER BY created_at DESC, id DESC
+             LIMIT 20'
+        );
+        $ticketStmt->execute([':uid' => (int) $user['id']]);
+        foreach ($ticketStmt->fetchAll() as $row) {
+            $atts = [];
+            if (!empty($row['attachments_json'])) {
+                $decoded = json_decode((string) $row['attachments_json'], true);
+                if (is_array($decoded)) {
+                    foreach ($decoded as $att) {
+                        if (is_array($att) && isset($att['originalName'])) {
+                            $atts[] = [
+                                'originalName' => (string) $att['originalName'],
+                                'fileSize'     => (int) ($att['fileSize'] ?? 0),
+                            ];
+                        }
+                    }
+                }
+            }
+            $supportTickets[] = [
+                'id'          => (int) $row['id'],
+                'subject'     => (string) $row['subject'],
+                'description' => (string) $row['description'],
+                'attachments' => $atts,
+                'status'      => (string) $row['status'],
+                'createdAt'   => str_replace(' ', 'T', (string) $row['created_at']),
+            ];
+        }
+    } catch (Throwable $e) {
+        $supportTickets = [];
+    }
+
     return [
-        'user'      => $user,
-        'products'  => $products,
-        'movements' => $movements,
-        'receipts'  => $receipts,
-        'orders'    => $orders,
-        'team'      => $team,
+        'user'           => $user,
+        'products'       => $products,
+        'movements'      => $movements,
+        'receipts'       => $receipts,
+        'orders'         => $orders,
+        'team'           => $team,
+        'supportTickets' => $supportTickets,
     ];
 }

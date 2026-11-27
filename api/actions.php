@@ -69,6 +69,63 @@ function signed_qty(string $type, float $qty): float
     return ($type === 'entry' ? 1.0 : -1.0) * $qty;
 }
 
+function convert_to_product_unit(float $qty, string $movUnit, string $prodUnit): float
+{
+    if ($movUnit === 'g' && $prodUnit === 'kg') {
+        return $qty / 1000.0;
+    }
+    if ($movUnit === 'kg' && $prodUnit === 'g') {
+        return $qty * 1000.0;
+    }
+    return $qty;
+}
+
+function compute_product_status(float $qty, float $minStock, ?string $expiryDate = null): string
+{
+    if ($qty <= 0) {
+        return 'critical';
+    }
+    $expiringVerySoon = false;
+    if ($expiryDate !== null && $expiryDate !== '') {
+        try {
+            $exp = new DateTimeImmutable(substr($expiryDate, 0, 10) . ' 00:00:00', new DateTimeZone('UTC'));
+            $today = new DateTimeImmutable('today', new DateTimeZone('UTC'));
+            $diffDays = (int) $today->diff($exp)->format('%r%a');
+            if ($diffDays <= 3) {
+                $expiringVerySoon = true;
+            }
+        } catch (Throwable $e) {
+            $expiringVerySoon = false;
+        }
+    }
+    if ($qty <= $minStock && $expiringVerySoon) {
+        return 'critical';
+    }
+    if ($qty <= $minStock) {
+        return 'low';
+    }
+    return 'ok';
+}
+
+function compute_product_accent(string $status): string
+{
+    return match ($status) {
+        'critical' => '#a54e44',
+        'low'      => '#b67c33',
+        default    => '#376759',
+    };
+}
+
+function respond_with_state(array $user, string $message, array $extra = []): never
+{
+    $payload = array_merge([
+        'ok'      => true,
+        'message' => $message,
+        'data'    => fetch_app_state($user),
+    ], $extra);
+    respond($payload);
+}
+
 $user = current_user();
 if (!$user) {
     respond(['ok' => false, 'error' => 'Sua sessão expirou. Entre novamente.'], 401);
@@ -108,7 +165,7 @@ try {
                 ':role'  => $role,
                 ':fn'    => $fn !== '' ? $fn : null,
             ]);
-            respond(['ok' => true, 'message' => 'Novo acesso criado para o funcionário.']);
+            respond_with_state($user, 'Novo acesso criado para o funcionário.');
         }
 
         // -------------------------------------------------------------------
@@ -175,7 +232,7 @@ try {
                     ':id'     => $empId,
                 ]);
             }
-            respond(['ok' => true, 'message' => 'Acesso do funcionário atualizado.']);
+            respond_with_state($user, 'Acesso do funcionário atualizado.');
         }
 
         // -------------------------------------------------------------------
@@ -192,12 +249,22 @@ try {
             $quantity = post_number('quantity');
             $minimumStock = post_number('minimumStock');
             $unitCost = post_number('unitCost') ?? 0.0;
+            $expiryDate = post_date('expiryDate');
 
             if ($name === '' || $code === '' || $quantity === null || $minimumStock === null || $quantity < 0 || $minimumStock < 0) {
-                respond(['ok' => false, 'error' => 'Preencha os campos obrigatórios do insumo.']);
+                respond(['ok' => false, 'error' => 'Preencha os campos obrigatórios do insumo (nome, código, quantidade e estoque mínimo).']);
             }
 
-            $status = ($quantity <= $minimumStock) ? 'low' : 'ok';
+            $dupStmt = $pdo->prepare('SELECT id FROM inventory_products WHERE UPPER(code) = UPPER(:code) LIMIT 1');
+            $dupStmt->execute([':code' => $code]);
+            if ($dupStmt->fetch()) {
+                respond(['ok' => false, 'error' => 'Já existe um insumo cadastrado com o código ' . $code . '.']);
+            }
+
+            $qtyRounded = round($quantity, 3);
+            $minRounded = round($minimumStock, 3);
+            $status = compute_product_status($qtyRounded, $minRounded, $expiryDate);
+            $accent = compute_product_accent($status);
 
             $stmt = $pdo->prepare(
                 'INSERT INTO inventory_products
@@ -205,7 +272,7 @@ try {
                   unit_cost, active, expiry, purchased_at, expiry_date, status, accent)
                  VALUES
                  (:name, :category, :catalog_type, :code, :location, :quantity, :unit, :minimum_stock,
-                  :unit_cost, 1, :expiry, :purchased_at, :expiry_date, :status, "#376759")'
+                  :unit_cost, 1, :expiry, :purchased_at, :expiry_date, :status, :accent)'
             );
             $stmt->execute([
                 ':name'          => $name,
@@ -213,16 +280,18 @@ try {
                 ':catalog_type'  => valid_catalog_type(post_text('catalogType')),
                 ':code'          => $code,
                 ':location'      => $location !== '' ? $location : 'Estoque geral',
-                ':quantity'      => $quantity,
+                ':quantity'      => $qtyRounded,
                 ':unit'          => valid_unit(post_text('unit')),
-                ':minimum_stock' => $minimumStock,
-                ':unit_cost'     => max(0, $unitCost),
+                ':minimum_stock' => $minRounded,
+                ':unit_cost'     => round(max(0, $unitCost), 2),
                 ':expiry'        => post_text('expiry') ?: null,
                 ':purchased_at'  => post_date('purchasedAt'),
-                ':expiry_date'   => post_date('expiryDate'),
+                ':expiry_date'   => $expiryDate,
                 ':status'        => $status,
+                ':accent'        => $accent,
             ]);
-            respond(['ok' => true, 'message' => 'Insumo cadastrado com sucesso.']);
+            $newId = (int) $pdo->lastInsertId();
+            respond_with_state($user, 'Insumo cadastrado com sucesso.', ['productId' => $newId]);
         }
 
         // -------------------------------------------------------------------
@@ -234,11 +303,15 @@ try {
             }
             $productId = (int) post_text('id', 20);
             $name = post_text('name');
+            $code = strtoupper(post_text('code', 80));
+            $category = post_text('category', 120);
+            $location = post_text('location');
             $minimumStock = post_number('minimumStock');
             $unitCost = post_number('unitCost') ?? 0.0;
+            $expiryDate = post_date('expiryDate');
 
-            if ($productId <= 0 || $name === '' || $minimumStock === null || $minimumStock < 0) {
-                respond(['ok' => false, 'error' => 'Revise nome e estoque mínimo.']);
+            if ($productId <= 0 || $name === '' || $code === '' || $minimumStock === null || $minimumStock < 0) {
+                respond(['ok' => false, 'error' => 'Revise nome, código e estoque mínimo.']);
             }
 
             $curStmt = $pdo->prepare('SELECT quantity FROM inventory_products WHERE id = :id LIMIT 1');
@@ -247,31 +320,41 @@ try {
             if (!$cur) {
                 respond(['ok' => false, 'error' => 'Insumo não encontrado.']);
             }
-            $status = ((float) $cur['quantity'] <= $minimumStock) ? 'low' : 'ok';
+
+            $dupStmt = $pdo->prepare('SELECT id FROM inventory_products WHERE UPPER(code) = UPPER(:code) AND id <> :id LIMIT 1');
+            $dupStmt->execute([':code' => $code, ':id' => $productId]);
+            if ($dupStmt->fetch()) {
+                respond(['ok' => false, 'error' => 'Já existe outro insumo com o código ' . $code . '.']);
+            }
+
+            $minRounded = round($minimumStock, 3);
+            $status = compute_product_status((float) $cur['quantity'], $minRounded, $expiryDate);
+            $accent = compute_product_accent($status);
 
             $stmt = $pdo->prepare(
                 'UPDATE inventory_products
                  SET name = :name, category = :category, catalog_type = :catalog_type,
                      code = :code, location = :location, unit = :unit,
                      minimum_stock = :minimum_stock, unit_cost = :unit_cost,
-                     expiry = :expiry, expiry_date = :expiry_date, status = :status
+                     expiry = :expiry, expiry_date = :expiry_date, status = :status, accent = :accent
                  WHERE id = :id'
             );
             $stmt->execute([
                 ':name'          => $name,
-                ':category'      => post_text('category', 120),
+                ':category'      => $category !== '' ? $category : 'Hortifrúti',
                 ':catalog_type'  => valid_catalog_type(post_text('catalogType')),
-                ':code'          => strtoupper(post_text('code', 80)),
-                ':location'      => post_text('location'),
+                ':code'          => $code,
+                ':location'      => $location !== '' ? $location : 'Estoque geral',
                 ':unit'          => valid_unit(post_text('unit')),
-                ':minimum_stock' => $minimumStock,
-                ':unit_cost'     => max(0, $unitCost),
+                ':minimum_stock' => $minRounded,
+                ':unit_cost'     => round(max(0, $unitCost), 2),
                 ':expiry'        => post_text('expiry') ?: null,
-                ':expiry_date'   => post_date('expiryDate'),
+                ':expiry_date'   => $expiryDate,
                 ':status'        => $status,
+                ':accent'        => $accent,
                 ':id'            => $productId,
             ]);
-            respond(['ok' => true, 'message' => 'Insumo atualizado.']);
+            respond_with_state($user, 'Insumo atualizado.');
         }
 
         // -------------------------------------------------------------------
@@ -285,7 +368,7 @@ try {
             $active = post_text('active') === 'true' ? 1 : 0;
             $stmt = $pdo->prepare('UPDATE inventory_products SET active = :active WHERE id = :id');
             $stmt->execute([':active' => $active, ':id' => $productId]);
-            respond(['ok' => true, 'message' => 'Disponibilidade do insumo atualizada.']);
+            respond_with_state($user, 'Disponibilidade do insumo atualizada.');
         }
 
         // -------------------------------------------------------------------
@@ -303,7 +386,7 @@ try {
             }
             $del = $pdo->prepare('DELETE FROM inventory_products WHERE id = :id');
             $del->execute([':id' => $productId]);
-            respond(['ok' => true, 'message' => 'Insumo sem histórico removido.']);
+            respond_with_state($user, 'Insumo sem histórico removido.');
         }
 
         // -------------------------------------------------------------------
@@ -318,7 +401,7 @@ try {
             $operationalArea = post_text('operationalArea');
 
             if ($productId <= 0 || !in_array($type, ['entry', 'exit'], true) || $quantity === null || $quantity <= 0 || $reason === '') {
-                respond(['ok' => false, 'error' => 'Preencha produto, quantidade e motivo.']);
+                respond(['ok' => false, 'error' => 'Preencha produto, quantidade válida e motivo.']);
             }
             if ($type === 'entry' && !is_manager($user)) {
                 respond(['ok' => false, 'error' => 'Apenas a gestão de estoque registra entradas.'], 403);
@@ -332,7 +415,10 @@ try {
 
             $pdo->beginTransaction();
             $prodStmt = $pdo->prepare(
-                'SELECT id, name, quantity, minimum_stock FROM inventory_products WHERE id = :id FOR UPDATE'
+                'SELECT id, name, unit, quantity, minimum_stock, unit_cost, purchased_at, expiry_date, active
+                 FROM inventory_products
+                 WHERE id = :id
+                 FOR UPDATE'
             );
             $prodStmt->execute([':id' => $productId]);
             $product = $prodStmt->fetch();
@@ -340,18 +426,58 @@ try {
                 $pdo->rollBack();
                 respond(['ok' => false, 'error' => 'Insumo não encontrado.']);
             }
-
-            $newQty = (float) $product['quantity'] + signed_qty($type, $quantity);
-            if ($newQty < 0) {
+            if ((int) $product['active'] === 0) {
                 $pdo->rollBack();
-                respond(['ok' => false, 'error' => 'Saldo insuficiente para ' . $product['name'] . '.']);
+                respond(['ok' => false, 'error' => 'Este insumo está inativo. Reative-o antes de movimentar.']);
             }
 
-            $newStatus = ($newQty <= (float) $product['minimum_stock']) ? 'low' : 'ok';
-            $upd = $pdo->prepare('UPDATE inventory_products SET quantity = :qty, status = :status WHERE id = :id');
-            $upd->execute([':qty' => $newQty, ':status' => $newStatus, ':id' => $productId]);
+            $prodUnit = (string) $product['unit'];
+            $movUnitRaw = post_text('unit', 32);
+            $movUnit = $movUnitRaw !== '' ? valid_unit($movUnitRaw) : $prodUnit;
+            $qtyRounded = round($quantity, 3);
+            $qtyInProdUnit = convert_to_product_unit($qtyRounded, $movUnit, $prodUnit);
+
+            $currentQty = (float) $product['quantity'];
+            $newQty = round($currentQty + signed_qty($type, $qtyInProdUnit), 3);
+            if ($newQty < 0) {
+                $pdo->rollBack();
+                $availFmt = rtrim(rtrim(number_format($currentQty, 3, ',', '.'), '0'), ',');
+                respond(['ok' => false, 'error' => 'Saldo insuficiente para ' . $product['name'] . '. Disponível: ' . $availFmt . ' ' . $prodUnit . '.']);
+            }
 
             $entryCost = ($type === 'entry') ? post_number('unitCost') : null;
+            $receivedDate = ($type === 'entry') ? post_date('receivedDate') : null;
+            $entryExpiryDate = ($type === 'entry') ? post_date('expiryDate') : null;
+
+            $nextUnitCost = ($type === 'entry' && $entryCost !== null && $entryCost >= 0)
+                ? round($entryCost, 2)
+                : (float) ($product['unit_cost'] ?? 0);
+            $nextPurchasedAt = ($type === 'entry' && $receivedDate !== null)
+                ? $receivedDate
+                : ($product['purchased_at'] ?: null);
+            $nextExpiryDate = ($type === 'entry' && $entryExpiryDate !== null)
+                ? $entryExpiryDate
+                : ($product['expiry_date'] ?: null);
+
+            $newStatus = compute_product_status($newQty, (float) $product['minimum_stock'], $nextExpiryDate);
+            $newAccent = compute_product_accent($newStatus);
+
+            $upd = $pdo->prepare(
+                'UPDATE inventory_products
+                 SET quantity = :qty, unit_cost = :unit_cost, purchased_at = :purchased_at,
+                     expiry_date = :expiry_date, status = :status, accent = :accent
+                 WHERE id = :id'
+            );
+            $upd->execute([
+                ':qty'          => $newQty,
+                ':unit_cost'    => $nextUnitCost,
+                ':purchased_at' => $nextPurchasedAt,
+                ':expiry_date'  => $nextExpiryDate,
+                ':status'       => $newStatus,
+                ':accent'       => $newAccent,
+                ':id'           => $productId,
+            ]);
+
             $ins = $pdo->prepare(
                 'INSERT INTO inventory_movements
                  (product_id, type, quantity, unit, reason, other_reason, supplier,
@@ -363,20 +489,25 @@ try {
             $ins->execute([
                 ':product_id'       => $productId,
                 ':type'             => $type,
-                ':quantity'         => $quantity,
-                ':unit'             => post_text('unit', 32) ?: 'un',
+                ':quantity'         => $qtyRounded,
+                ':unit'             => $movUnit,
                 ':reason'           => $reason,
                 ':other_reason'     => $reason === 'Outros' ? $otherReason : null,
                 ':supplier'         => $type === 'entry' ? (post_text('supplier') ?: null) : null,
-                ':received_date'    => $type === 'entry' ? post_date('receivedDate') : null,
-                ':unit_cost'        => $entryCost,
-                ':expiry_date'      => $type === 'entry' ? post_date('expiryDate') : null,
+                ':received_date'    => $receivedDate,
+                ':unit_cost'        => ($entryCost !== null && $entryCost >= 0) ? round($entryCost, 2) : null,
+                ':expiry_date'      => $entryExpiryDate,
                 ':operational_area' => ($user['role'] === 'operational' && $type === 'exit') ? $operationalArea : null,
                 ':created_by'       => $user['id'],
             ]);
+            $movId = (int) $pdo->lastInsertId();
             $pdo->commit();
 
-            respond(['ok' => true, 'message' => $type === 'entry' ? 'Entrada registrada.' : 'Baixa registrada.']);
+            respond_with_state(
+                $user,
+                $type === 'entry' ? 'Entrada registrada e saldo atualizado.' : 'Baixa registrada e saldo atualizado.',
+                ['movementId' => $movId]
+            );
         }
 
         // -------------------------------------------------------------------
@@ -402,7 +533,12 @@ try {
                 respond(['ok' => false, 'error' => 'Movimentação não encontrada.']);
             }
 
-            $pStmt = $pdo->prepare('SELECT id, name, quantity, minimum_stock FROM inventory_products WHERE id = :id FOR UPDATE');
+            $pStmt = $pdo->prepare(
+                'SELECT id, name, unit, quantity, minimum_stock, expiry_date
+                 FROM inventory_products
+                 WHERE id = :id
+                 FOR UPDATE'
+            );
             $pStmt->execute([':id' => (int) $orig['product_id']]);
             $prod = $pStmt->fetch();
             if (!$prod) {
@@ -410,16 +546,27 @@ try {
                 respond(['ok' => false, 'error' => 'Insumo não encontrado.']);
             }
 
-            $delta = signed_qty((string) $orig['type'], $quantity) - signed_qty((string) $orig['type'], (float) $orig['quantity']);
-            $newQty = (float) $prod['quantity'] + $delta;
+            $prodUnit = (string) $prod['unit'];
+            $newUnitRaw = post_text('unit', 32);
+            $newUnit = $newUnitRaw !== '' ? valid_unit($newUnitRaw) : (string) $orig['unit'];
+            $qtyRounded = round($quantity, 3);
+
+            $oldStockQty = convert_to_product_unit((float) $orig['quantity'], (string) $orig['unit'], $prodUnit);
+            $newStockQty = convert_to_product_unit($qtyRounded, $newUnit, $prodUnit);
+            $delta = signed_qty((string) $orig['type'], $newStockQty) - signed_qty((string) $orig['type'], $oldStockQty);
+            $newQty = round((float) $prod['quantity'] + $delta, 3);
             if ($newQty < 0) {
                 $pdo->rollBack();
                 respond(['ok' => false, 'error' => 'Saldo insuficiente para ' . $prod['name'] . '.']);
             }
 
-            $newStatus = ($newQty <= (float) $prod['minimum_stock']) ? 'low' : 'ok';
-            $pdo->prepare('UPDATE inventory_products SET quantity = :qty, status = :status WHERE id = :id')
-                ->execute([':qty' => $newQty, ':status' => $newStatus, ':id' => (int) $prod['id']]);
+            $newExpiry = post_date('expiryDate');
+            $effectiveExpiry = $newExpiry ?: ($prod['expiry_date'] ?: null);
+            $newStatus = compute_product_status($newQty, (float) $prod['minimum_stock'], $effectiveExpiry);
+            $newAccent = compute_product_accent($newStatus);
+
+            $pdo->prepare('UPDATE inventory_products SET quantity = :qty, status = :status, accent = :accent WHERE id = :id')
+                ->execute([':qty' => $newQty, ':status' => $newStatus, ':accent' => $newAccent, ':id' => (int) $prod['id']]);
 
             $pdo->prepare(
                 'UPDATE inventory_movements
@@ -427,17 +574,17 @@ try {
                      received_date = :received_date, unit_cost = :unit_cost, expiry_date = :expiry_date
                  WHERE id = :id'
             )->execute([
-                ':qty'           => $quantity,
-                ':unit'          => post_text('unit', 32) ?: (string) $orig['unit'],
+                ':qty'           => $qtyRounded,
+                ':unit'          => $newUnit,
                 ':supplier'      => post_text('supplier') ?: null,
                 ':received_date' => post_date('receivedDate'),
-                ':unit_cost'     => $unitCost,
-                ':expiry_date'   => post_date('expiryDate'),
+                ':unit_cost'     => ($unitCost !== null && $unitCost >= 0) ? round($unitCost, 2) : null,
+                ':expiry_date'   => $newExpiry,
                 ':id'            => $movId,
             ]);
             $pdo->commit();
 
-            respond(['ok' => true, 'message' => 'Entrada atualizada e saldo recalculado.']);
+            respond_with_state($user, 'Entrada atualizada e saldo recalculado.');
         }
 
         // -------------------------------------------------------------------
@@ -458,24 +605,31 @@ try {
                 respond(['ok' => false, 'error' => 'Registro não encontrado.']);
             }
 
-            $pStmt = $pdo->prepare('SELECT id, quantity, minimum_stock FROM inventory_products WHERE id = :id FOR UPDATE');
+            $pStmt = $pdo->prepare(
+                'SELECT id, unit, quantity, minimum_stock, expiry_date
+                 FROM inventory_products
+                 WHERE id = :id
+                 FOR UPDATE'
+            );
             $pStmt->execute([':id' => (int) $orig['product_id']]);
             $prod = $pStmt->fetch();
             if ($prod) {
-                $newQty = (float) $prod['quantity'] - signed_qty((string) $orig['type'], (float) $orig['quantity']);
+                $origStockQty = convert_to_product_unit((float) $orig['quantity'], (string) $orig['unit'], (string) $prod['unit']);
+                $newQty = round((float) $prod['quantity'] - signed_qty((string) $orig['type'], $origStockQty), 3);
                 if ($newQty < 0) {
                     $pdo->rollBack();
                     respond(['ok' => false, 'error' => 'A exclusão deixaria o estoque com saldo negativo.']);
                 }
-                $newStatus = ($newQty <= (float) $prod['minimum_stock']) ? 'low' : 'ok';
-                $pdo->prepare('UPDATE inventory_products SET quantity = :qty, status = :status WHERE id = :id')
-                    ->execute([':qty' => $newQty, ':status' => $newStatus, ':id' => (int) $prod['id']]);
+                $newStatus = compute_product_status($newQty, (float) $prod['minimum_stock'], $prod['expiry_date'] ?: null);
+                $newAccent = compute_product_accent($newStatus);
+                $pdo->prepare('UPDATE inventory_products SET quantity = :qty, status = :status, accent = :accent WHERE id = :id')
+                    ->execute([':qty' => $newQty, ':status' => $newStatus, ':accent' => $newAccent, ':id' => (int) $prod['id']]);
             }
 
             $pdo->prepare('DELETE FROM inventory_movements WHERE id = :id')->execute([':id' => $movId]);
             $pdo->commit();
 
-            respond(['ok' => true, 'message' => 'Registro removido e saldo recalculado.']);
+            respond_with_state($user, 'Registro removido e saldo recalculado.');
         }
 
         // -------------------------------------------------------------------
@@ -495,23 +649,23 @@ try {
             $productId = $prodRaw !== '' ? (int) $prodRaw : null;
 
             $stmt = $pdo->prepare(
-                'INSERT INTO purchase_orders
+                "INSERT INTO purchase_orders
                  (title, product_id, supplier, quantity, unit, unit_cost, expected_date, status, notes, created_by)
                  VALUES
-                 (:title, :product_id, :supplier, :quantity, :unit, :unit_cost, :expected_date, "planned", :notes, :created_by)'
+                 (:title, :product_id, :supplier, :quantity, :unit, :unit_cost, :expected_date, 'planned', :notes, :created_by)"
             );
             $stmt->execute([
                 ':title'         => $title,
                 ':product_id'    => $productId ?: null,
                 ':supplier'      => post_text('supplier') ?: null,
-                ':quantity'      => $quantity,
+                ':quantity'      => round($quantity, 3),
                 ':unit'          => valid_unit(post_text('unit')),
                 ':unit_cost'     => post_number('unitCost'),
                 ':expected_date' => $expectedDate,
                 ':notes'         => post_text('notes', 500) ?: null,
                 ':created_by'    => $user['id'],
             ]);
-            respond(['ok' => true, 'message' => 'Compra futura planejada.']);
+            respond_with_state($user, 'Compra futura planejada.');
         }
 
         // -------------------------------------------------------------------
@@ -544,7 +698,7 @@ try {
                 ':title'         => $title,
                 ':product_id'    => $productId ?: null,
                 ':supplier'      => post_text('supplier') ?: null,
-                ':quantity'      => $quantity,
+                ':quantity'      => round($quantity, 3),
                 ':unit'          => valid_unit(post_text('unit')),
                 ':unit_cost'     => post_number('unitCost'),
                 ':expected_date' => $expectedDate,
@@ -552,7 +706,7 @@ try {
                 ':notes'         => post_text('notes', 500) ?: null,
                 ':id'            => $ordId,
             ]);
-            respond(['ok' => true, 'message' => 'Pedido de compra atualizado.']);
+            respond_with_state($user, 'Pedido de compra atualizado.');
         }
 
         // -------------------------------------------------------------------
@@ -564,7 +718,7 @@ try {
             }
             $ordId = (int) post_text('id', 20);
             $pdo->prepare('DELETE FROM purchase_orders WHERE id = :id')->execute([':id' => $ordId]);
-            respond(['ok' => true, 'message' => 'Planejamento de compra removido.']);
+            respond_with_state($user, 'Planejamento de compra removido.');
         }
 
         // -------------------------------------------------------------------
@@ -602,7 +756,7 @@ try {
             $ins->execute([
                 ':name'             => (string) $prod['name'],
                 ':product_id'       => $productId,
-                ':quantity'         => $quantity,
+                ':quantity'         => round($quantity, 3),
                 ':unit'             => $unit,
                 ':handled_at'       => $handledAt,
                 ':expiry_date'      => $expiryDate,
@@ -610,7 +764,7 @@ try {
                 ':responsible_name' => $responsibleName,
                 ':created_by'       => $user['id'],
             ]);
-            respond(['ok' => true, 'message' => 'Etiqueta criada e guardada.']);
+            respond_with_state($user, 'Etiqueta criada e guardada.');
         }
 
         // -------------------------------------------------------------------
@@ -672,7 +826,111 @@ try {
                 ':file_size'     => (int) $file['size'],
                 ':uploaded_by'   => $user['id'],
             ]);
-            respond(['ok' => true, 'message' => 'Comprovante salvo na pasta de compras.']);
+            respond_with_state($user, 'Comprovante salvo na pasta de compras.');
+        }
+
+        // -------------------------------------------------------------------
+        // 15. Enviar mensagem para Ajuda e Suporte
+        // -------------------------------------------------------------------
+        case 'createSupportTicket': {
+            $subject = post_text('subject', 180);
+            $description = post_text('description', 4000);
+
+            if ($subject === '' || $description === '') {
+                respond(['ok' => false, 'error' => 'Preencha o assunto e a descrição do problema.']);
+            }
+
+            $savedAttachments = [];
+            if (isset($_FILES['attachments']) && is_array($_FILES['attachments']['name'] ?? null)) {
+                $names = $_FILES['attachments']['name'];
+                $tmpNames = $_FILES['attachments']['tmp_name'];
+                $errors = $_FILES['attachments']['error'];
+                $sizes = $_FILES['attachments']['size'];
+                $count = count($names);
+
+                $allowedMimeToExt = [
+                    'application/pdf'                                                         => 'pdf',
+                    'image/jpeg'                                                              => 'jpg',
+                    'image/png'                                                               => 'png',
+                    'image/webp'                                                              => 'webp',
+                    'text/plain'                                                              => 'txt',
+                    'text/csv'                                                                => 'csv',
+                    'application/vnd.ms-excel'                                                => 'xls',
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'       => 'xlsx',
+                    'application/msword'                                                      => 'doc',
+                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
+                ];
+                $allowedExts = ['pdf', 'jpg', 'jpeg', 'png', 'webp', 'txt', 'csv', 'xls', 'xlsx', 'doc', 'docx'];
+
+                $dir = __DIR__ . '/../uploads/support';
+                $finfo = new finfo(FILEINFO_MIME_TYPE);
+
+                $validFilesCount = 0;
+                for ($i = 0; $i < $count; $i++) {
+                    $err = (int) ($errors[$i] ?? UPLOAD_ERR_NO_FILE);
+                    if ($err === UPLOAD_ERR_NO_FILE) {
+                        continue;
+                    }
+                    if ($err !== UPLOAD_ERR_OK) {
+                        respond(['ok' => false, 'error' => 'Falha ao enviar um dos arquivos anexados.']);
+                    }
+                    $validFilesCount++;
+                    if ($validFilesCount > 5) {
+                        respond(['ok' => false, 'error' => 'Anexe no máximo 5 arquivos por chamado.']);
+                    }
+                    $size = (int) ($sizes[$i] ?? 0);
+                    if ($size <= 0 || $size > 10 * 1024 * 1024) {
+                        respond(['ok' => false, 'error' => 'Cada arquivo anexado deve ter até 10 MB.']);
+                    }
+
+                    $tmpPath = (string) ($tmpNames[$i] ?? '');
+                    $origName = mb_substr((string) ($names[$i] ?? 'anexo'), 0, 255);
+                    $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
+                    $mime = (string) $finfo->file($tmpPath);
+
+                    $safeExt = $allowedMimeToExt[$mime] ?? (in_array($ext, $allowedExts, true) ? $ext : null);
+                    if ($safeExt === null) {
+                        respond(['ok' => false, 'error' => 'Formato de arquivo não permitido: ' . $origName . '. Envie PDF, imagens, TXT, CSV, DOC ou XLS.']);
+                    }
+
+                    if (!is_dir($dir)) {
+                        mkdir($dir, 0755, true);
+                    }
+                    $storedName = bin2hex(random_bytes(16)) . '.' . $safeExt;
+                    if (!move_uploaded_file($tmpPath, $dir . '/' . $storedName)) {
+                        respond(['ok' => false, 'error' => 'Não foi possível salvar o anexo enviado.'], 500);
+                    }
+
+                    $savedAttachments[] = [
+                        'storedName'   => $storedName,
+                        'originalName' => $origName,
+                        'mimeType'     => $mime,
+                        'fileSize'     => $size,
+                    ];
+                }
+            }
+
+            ensure_support_tickets_table($pdo);
+
+            $ins = $pdo->prepare(
+                'INSERT INTO support_tickets (user_id, subject, description, attachments_json, status)
+                 VALUES (:user_id, :subject, :description, :attachments_json, \'open\')'
+            );
+            $ins->execute([
+                ':user_id'          => $user['id'],
+                ':subject'          => $subject,
+                ':description'      => $description,
+                ':attachments_json' => !empty($savedAttachments)
+                    ? json_encode($savedAttachments, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+                    : null,
+            ]);
+            $ticketId = (int) $pdo->lastInsertId();
+
+            respond_with_state(
+                $user,
+                'Sua mensagem foi enviada ao suporte do SICE e será analisada e respondida em até 48 horas.',
+                ['ticketId' => $ticketId]
+            );
         }
 
         default:
