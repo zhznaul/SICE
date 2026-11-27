@@ -18,13 +18,28 @@
 
   const CATALOG_TYPE_LABELS = {
     perishable: 'Perecível',
-    'non-perishable': 'Não perecível',
-    beverage: 'Bebida',
-    disposable: 'Descartável',
+    distilled: 'Destilados',
+    soft: 'Soft',
+    syrup: 'Xaropes',
+    disposable: 'Descartáveis',
+  };
+
+  const BEVERAGE_CLASSIFICATIONS = ['distilled', 'soft', 'syrup'];
+
+  const AUTO_CLASSIFICATION_BY_CATEGORY = {
+    'Carnes e pescados': 'perishable',
+    'Laticínios e frios': 'perishable',
+    Hortifrutti: 'perishable',
+    'Materiais descartáveis': 'disposable',
+  };
+
+  const PACKAGE_STATUS_LABELS = {
+    closed: 'Fechado',
+    opened: 'Aberto',
   };
 
   const INVENTORY_GROUPS = [
-    'Hortifrúti',
+    'Hortifrutti',
     'Carnes e pescados',
     'Laticínios e frios',
     'Bebidas',
@@ -83,31 +98,29 @@
     return d.toLocaleDateString('pt-BR');
   }
 
-  function isLowStock(product) {
-    return product.active !== false && Number(product.quantity) <= Number(product.minimumStock);
-  }
-
-  function expiresSoon(product) {
-    if (product.active === false) return false;
-    if (product.expiryDate) {
-      const iso = String(product.expiryDate).length === 10 ? `${product.expiryDate}T00:00:00Z` : product.expiryDate;
-      const days = (new Date(iso).getTime() - Date.now()) / 86400000;
-      return days <= 7;
+  function normalizeCategoryName(category) {
+    const raw = String(category || '').trim();
+    if (!raw) return 'Hortifrutti';
+    const lower = raw.toLowerCase();
+    if (lower === 'hortifrúti' || lower === 'hortifruti' || lower === 'hortifrutti') {
+      return 'Hortifrutti';
     }
-    return /(?:hoje|amanhã|\b[0-7]\s*dias?\b)/i.test(product.expiry || '');
-  }
-
-  function needsAttention(product) {
-    if (product.active === false) return false;
-    return isLowStock(product) || product.status === 'critical' || expiresSoon(product);
+    if (lower === 'carnes e pescados') return 'Carnes e pescados';
+    if (lower === 'laticínios e frios' || lower === 'laticinios e frios') return 'Laticínios e frios';
+    if (lower === 'bebidas') return 'Bebidas';
+    if (lower === 'materiais descartáveis' || lower === 'materiais descartaveis') {
+      return 'Materiais descartáveis';
+    }
+    return raw;
   }
 
   function inventoryGroup(product) {
-    if (INVENTORY_GROUPS.includes(product.category)) {
-      return product.category;
+    const normalized = normalizeCategoryName(product?.category);
+    if (INVENTORY_GROUPS.includes(normalized)) {
+      return normalized;
     }
-    const reference = `${product.name || ''} ${product.category || ''}`.toLowerCase();
-    if (/bebida|gin|vinho|cerveja|whisky|vodka|rum|suco|água|refrigerante/.test(reference)) {
+    const reference = `${product?.name || ''} ${product?.category || ''}`.toLowerCase();
+    if (/bebida|gin|vinho|cerveja|whisky|vodka|rum|suco|água|refrigerante|xarope|syrup|tônica|energético/.test(reference)) {
       return 'Bebidas';
     }
     if (/descart|guardanapo|canudo|embalagem|sacola|copo|luva|papel/.test(reference)) {
@@ -119,7 +132,235 @@
     if (/proteína|frutos do mar|carne|filé|salmão|camarão|polvo|lula|robalo|peixe/.test(reference)) {
       return 'Carnes e pescados';
     }
-    return 'Hortifrúti';
+    return 'Hortifrutti';
+  }
+
+  function resolveCatalogType(category, requestedType) {
+    const normCat = normalizeCategoryName(category);
+    if (AUTO_CLASSIFICATION_BY_CATEGORY[normCat]) {
+      return AUTO_CLASSIFICATION_BY_CATEGORY[normCat];
+    }
+    if (normCat === 'Bebidas') {
+      return BEVERAGE_CLASSIFICATIONS.includes(requestedType) ? requestedType : null;
+    }
+    return CATALOG_TYPE_LABELS[requestedType] ? requestedType : 'perishable';
+  }
+
+  function getProductClassification(product) {
+    if (!product) return 'perishable';
+    const group = inventoryGroup(product);
+    if (AUTO_CLASSIFICATION_BY_CATEGORY[group]) {
+      return AUTO_CLASSIFICATION_BY_CATEGORY[group];
+    }
+    if (group === 'Bebidas') {
+      if (BEVERAGE_CLASSIFICATIONS.includes(product.catalogType)) {
+        return product.catalogType;
+      }
+      return product.catalogType || null;
+    }
+    return CATALOG_TYPE_LABELS[product.catalogType] ? product.catalogType : 'perishable';
+  }
+
+  function getClassificationLabel(productOrCode) {
+    const code =
+      typeof productOrCode === 'string'
+        ? productOrCode
+        : getProductClassification(productOrCode);
+    if (code && CATALOG_TYPE_LABELS[code]) return CATALOG_TYPE_LABELS[code];
+    if (code === 'beverage' || !code) return 'Bebidas (definir classificação)';
+    return String(code);
+  }
+
+  function getClassificationRules(catalogType) {
+    switch (catalogType) {
+      case 'distilled':
+        return {
+          code: 'distilled',
+          label: 'Destilados',
+          hasExpiry: false,
+          expiryIndeterminate: true,
+          usesManufacturedAt: false,
+          usesHandledAt: false,
+          supportsOpenClose: false,
+          expiryAlertEligible: false,
+          disposableControl: false,
+        };
+      case 'soft':
+        return {
+          code: 'soft',
+          label: 'Soft',
+          hasExpiry: true,
+          expiryIndeterminate: false,
+          usesManufacturedAt: true,
+          usesHandledAt: false,
+          supportsOpenClose: false,
+          expiryAlertEligible: true,
+          disposableControl: false,
+        };
+      case 'syrup':
+        return {
+          code: 'syrup',
+          label: 'Xaropes',
+          hasExpiry: true,
+          expiryIndeterminate: false,
+          usesManufacturedAt: true,
+          usesHandledAt: true,
+          supportsOpenClose: true,
+          expiryAlertEligible: true,
+          disposableControl: false,
+        };
+      case 'disposable':
+        return {
+          code: 'disposable',
+          label: 'Descartáveis',
+          hasExpiry: false,
+          expiryIndeterminate: false,
+          usesManufacturedAt: false,
+          usesHandledAt: false,
+          supportsOpenClose: false,
+          expiryAlertEligible: false,
+          disposableControl: true,
+        };
+      default:
+        return {
+          code: 'perishable',
+          label: 'Perecível',
+          hasExpiry: true,
+          expiryIndeterminate: false,
+          usesManufacturedAt: false,
+          usesHandledAt: true,
+          supportsOpenClose: false,
+          expiryAlertEligible: true,
+          disposableControl: false,
+        };
+    }
+  }
+
+  function calculateOpenedExpiryDate(handledAt, shelfLifeDays) {
+    const days = Number(shelfLifeDays);
+    if (!handledAt || !Number.isInteger(days) || days <= 0) return null;
+    const match = String(handledAt).slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return null;
+    const dt = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+    if (Number.isNaN(dt.getTime())) return null;
+    dt.setUTCDate(dt.getUTCDate() + days);
+    return dt.toISOString().slice(0, 10);
+  }
+
+  function getEffectiveExpiryInfo(product) {
+    const cls = getProductClassification(product);
+    const rules = getClassificationRules(cls);
+
+    if (cls === 'distilled' || product?.expiryIndeterminate) {
+      return {
+        mode: 'indeterminate',
+        label: 'VALIDADE',
+        displayText: 'Indeterminada',
+        shortText: 'Indeterminada',
+        effectiveDate: null,
+        openedExpiryDate: null,
+        needsShelfLifeConfig: false,
+      };
+    }
+
+    if (cls === 'disposable') {
+      return {
+        mode: 'none',
+        label: 'CONTROLE',
+        displayText: 'Sem controle de validade',
+        shortText: 'Sem validade',
+        effectiveDate: null,
+        openedExpiryDate: null,
+        needsShelfLifeConfig: false,
+      };
+    }
+
+    const origDate = product?.expiryDate ? String(product.expiryDate).slice(0, 10) : null;
+
+    if (cls === 'syrup') {
+      const pkgStatus = product?.packageStatus === 'opened' ? 'opened' : 'closed';
+      if (pkgStatus === 'opened') {
+        const openedExpiry =
+          (product?.openedExpiryDate ? String(product.openedExpiryDate).slice(0, 10) : null) ||
+          calculateOpenedExpiryDate(product?.handledAt, product?.shelfLifeAfterOpeningDays);
+
+        if (!openedExpiry) {
+          return {
+            mode: 'opened_pending',
+            label: 'LIMITE ABERTO',
+            displayText: 'Definir prazo após abertura',
+            shortText: 'Definir prazo',
+            effectiveDate: origDate,
+            openedExpiryDate: null,
+            needsShelfLifeConfig: true,
+          };
+        }
+
+        const effectiveDate = origDate && origDate < openedExpiry ? origDate : openedExpiry;
+        return {
+          mode: 'opened_limit',
+          label: 'LIMITE ABERTO',
+          displayText: formatDate(openedExpiry),
+          shortText: formatDate(effectiveDate),
+          effectiveDate,
+          openedExpiryDate: openedExpiry,
+          needsShelfLifeConfig: false,
+        };
+      }
+    }
+
+    if (origDate) {
+      return {
+        mode: 'date',
+        label: 'VALIDADE',
+        displayText: formatDate(origDate),
+        shortText: formatDate(origDate),
+        effectiveDate: origDate,
+        openedExpiryDate: null,
+        needsShelfLifeConfig: false,
+      };
+    }
+
+    return {
+      mode: 'missing',
+      label: 'VALIDADE',
+      displayText: rules.hasExpiry ? product?.expiry || 'Não informado' : 'Não aplicável',
+      shortText: rules.hasExpiry ? product?.expiry || '—' : '—',
+      effectiveDate: null,
+      openedExpiryDate: null,
+      needsShelfLifeConfig: false,
+    };
+  }
+
+  function isLowStock(product) {
+    return product.active !== false && Number(product.quantity) <= Number(product.minimumStock);
+  }
+
+  function expiresSoon(product) {
+    if (!product || product.active === false) return false;
+    const cls = getProductClassification(product);
+    const rules = getClassificationRules(cls);
+    if (!rules.expiryAlertEligible || product.expiryIndeterminate) {
+      return false;
+    }
+    const info = getEffectiveExpiryInfo(product);
+    if (info.effectiveDate) {
+      const iso = `${info.effectiveDate}T00:00:00Z`;
+      const days = (new Date(iso).getTime() - Date.now()) / 86400000;
+      return days <= 7;
+    }
+    return /(?:hoje|amanhã|\b[0-7]\s*dias?\b)/i.test(product.expiry || '');
+  }
+
+  function needsAttention(product) {
+    if (!product || product.active === false) return false;
+    return isLowStock(product) || product.status === 'critical' || expiresSoon(product);
+  }
+
+  function getProductStateHistory(productId) {
+    return (state.stateHistory || []).filter(
+      (item) => String(item.productId) === String(productId)
+    );
   }
 
   function formatFileSize(bytes) {
@@ -166,6 +407,7 @@
     orders: Array.isArray(initialData.orders) ? initialData.orders : [],
     team: Array.isArray(initialData.team) ? initialData.team : [],
     supportTickets: Array.isArray(initialData.supportTickets) ? initialData.supportTickets : [],
+    stateHistory: Array.isArray(initialData.stateHistory) ? initialData.stateHistory : [],
 
     theme: loadSavedTheme(),
     active: 'Visão geral',
@@ -182,6 +424,13 @@
     modalExitReason: '',
     toast: '',
     toastTimer: null,
+
+    // Estado dinâmico do formulário de cadastro de insumo
+    productFormCategory: 'Hortifrutti',
+    productFormCatalogType: 'distilled',
+    productFormPackageStatus: 'closed',
+    productFormHandledAt: '',
+    productFormShelfLifeDays: '',
 
     // Ajuda e suporte
     supportSuccess: '',
@@ -206,8 +455,10 @@
     labelProductId: '',
     labelQuantity: '',
     labelUnit: 'UN',
+    labelManufacturedAt: '',
     labelHandledAt: '',
     labelExpiryDate: '',
+    labelPackageStatus: 'closed',
     labelLot: '',
     labelResponsibleName: '',
     labelQr: '',
@@ -276,6 +527,7 @@
     state.orders = Array.isArray(data.orders) ? data.orders : [];
     state.team = Array.isArray(data.team) ? data.team : [];
     state.supportTickets = Array.isArray(data.supportTickets) ? data.supportTickets : state.supportTickets;
+    state.stateHistory = Array.isArray(data.stateHistory) ? data.stateHistory : state.stateHistory;
     state.cmvInit = false;
     if (state.selectedProductId && !getSelectedProduct()) {
       state.selectedProductId = null;
@@ -539,6 +791,14 @@
       <div class="product-list">
         ${products
           .map((product) => {
+            const cls = getProductClassification(product);
+            const rules = getClassificationRules(cls);
+            const classLabel = getClassificationLabel(product);
+            const expiryInfo = getEffectiveExpiryInfo(product);
+            const syrupBadge =
+              cls === 'syrup'
+                ? ` · ${PACKAGE_STATUS_LABELS[product.packageStatus === 'opened' ? 'opened' : 'closed']}`
+                : '';
             const statusText =
               product.active === false
                 ? 'Inativo'
@@ -546,8 +806,9 @@
                   ? 'Saudável'
                   : product.status === 'low'
                     ? 'Estoque baixo'
-                    : 'Prioridade PVPS';
-            const expiryText = product.expiryDate ? formatDate(product.expiryDate) : product.expiry || '—';
+                    : rules.expiryAlertEligible
+                      ? 'Prioridade PVPS'
+                      : 'Estoque zerado';
             return `
               <button class="product-row" type="button" data-select-product="${esc(product.id)}">
                 <span class="product-art" style="--accent: ${esc(product.accent || '#376759')}">
@@ -555,15 +816,15 @@
                 </span>
                 <span class="product-main">
                   <strong>${esc(product.name)}</strong>
-                  <small>${esc(product.code)} · ${esc(inventoryGroup(product))} · ${esc(product.location)}</small>
+                  <small>${esc(product.code)} · ${esc(inventoryGroup(product))} · ${esc(classLabel)}${esc(syrupBadge)} · ${esc(product.location)}</small>
                 </span>
                 <span class="product-stock">
                   <small>DISPONÍVEL</small>
                   <strong>${esc(product.quantity)} <em>${esc(product.unit)}</em></strong>
                 </span>
                 <span class="product-expiry">
-                  <small>VALIDADE</small>
-                  <strong>${esc(expiryText)}</strong>
+                  <small>${esc(expiryInfo.label)}</small>
+                  <strong class="${expiryInfo.needsShelfLifeConfig ? 'expiry-pending-text' : ''}">${esc(expiryInfo.shortText)}</strong>
                 </span>
                 <span class="status status--${esc(product.status)}">
                   <i></i>
@@ -744,8 +1005,9 @@
     return state.products
       .filter((product) => {
         const group = inventoryGroup(product);
+        const classLabel = getClassificationLabel(product);
         const matchCat = state.invCategory === 'Todos' || group === state.invCategory;
-        const matchTerm = `${product.name} ${product.code} ${product.location} ${group}`
+        const matchTerm = `${product.name} ${product.code} ${product.location} ${group} ${classLabel}`
           .toLowerCase()
           .includes(term);
         return matchCat && matchTerm;
@@ -840,6 +1102,8 @@
             let editorHtml = '';
 
             if (canManage && m.type === 'entry') {
+              const prodCls = product ? getProductClassification(product) : 'perishable';
+              const prodRules = getClassificationRules(prodCls);
               editorHtml = `
               <details class="record-editor">
                 <summary>Editar entrada</summary>
@@ -868,10 +1132,26 @@
                       <span>Custo unitário</span>
                       <input name="unitCost" type="number" min="0" step="any" value="${esc(m.unitCost ?? '')}">
                     </label>
+                    ${
+                      prodRules.usesManufacturedAt
+                        ? `
+                    <label class="form-field">
+                      <span>Data de fabricação</span>
+                      <input name="manufacturedAt" type="date" value="${esc((m.manufacturedAt || '').slice(0, 10))}">
+                    </label>
+                    `
+                        : ''
+                    }
+                    ${
+                      prodRules.hasExpiry
+                        ? `
                     <label class="form-field">
                       <span>Validade</span>
                       <input name="expiryDate" type="date" value="${esc((m.expiryDate || '').slice(0, 10))}">
                     </label>
+                    `
+                        : ''
+                    }
                   </div>
                   <div class="record-actions">
                     <button class="btn btn--primary" type="submit">Salvar ${icon('arrow-right', 16)}</button>
@@ -1007,8 +1287,10 @@
     const expiryAlerts = state.products
       .filter(expiresSoon)
       .sort((a, b) => {
-        const da = a.expiryDate ? new Date(a.expiryDate).getTime() : Number.MAX_SAFE_INTEGER;
-        const db = b.expiryDate ? new Date(b.expiryDate).getTime() : Number.MAX_SAFE_INTEGER;
+        const ea = getEffectiveExpiryInfo(a).effectiveDate;
+        const eb = getEffectiveExpiryInfo(b).effectiveDate;
+        const da = ea ? new Date(`${ea}T00:00:00Z`).getTime() : Number.MAX_SAFE_INTEGER;
+        const db = eb ? new Date(`${eb}T00:00:00Z`).getTime() : Number.MAX_SAFE_INTEGER;
         return da - db || a.name.localeCompare(b.name, 'pt-BR');
       });
     const stockAlerts = state.products
@@ -1021,13 +1303,17 @@
     const noticeHistory = (
       isExpiry
         ? [
-            ...expiryAlerts.map((product) => ({
-              id: `expiry-${product.id}`,
-              title: `${product.name} próximo do vencimento`,
-              text: `${product.code} · ${product.expiryDate ? formatDate(product.expiryDate) : product.expiry || 'validade curta'}`,
-              date: product.updatedAt || product.createdAt || new Date().toISOString(),
-              type: 'expiry',
-            })),
+            ...expiryAlerts.map((product) => {
+              const info = getEffectiveExpiryInfo(product);
+              const detailPrefix = info.mode === 'opened_limit' ? 'Limite após abertura: ' : '';
+              return {
+                id: `expiry-${product.id}`,
+                title: `${product.name} próximo do vencimento`,
+                text: `${product.code} · ${getClassificationLabel(product)} · ${detailPrefix}${info.effectiveDate ? formatDate(info.effectiveDate) : product.expiry || 'validade curta'}`,
+                date: product.updatedAt || product.createdAt || new Date().toISOString(),
+                type: 'expiry',
+              };
+            }),
             ...state.movements
               .filter((m) => m.type === 'exit' && /validade/i.test(m.reason || ''))
               .map((m) => {
@@ -1316,7 +1602,7 @@
             <div class="form-grid">
               <label class="form-field">
                 <span>Título</span>
-                <input name="title" required placeholder="Ex.: Nota fiscal hortifruti">
+                <input name="title" required placeholder="Ex.: Nota fiscal hortifrutti">
               </label>
               <label class="form-field">
                 <span>Fornecedor</span>
@@ -1698,7 +1984,7 @@
                         </span>
                         <span>
                           <strong>${esc(prod?.name || 'Insumo')}</strong>
-                          <small>${esc(m.reason)}</small>
+                          <small>${prod ? `${esc(getClassificationLabel(prod))} · ` : ''}${esc(m.reason)}</small>
                         </span>
                         <b>−${esc(m.quantity)} ${esc(m.unit)}</b>
                       </div>
@@ -1707,6 +1993,43 @@
                   .join('')
               : emptyStateHtml('Nenhuma baixa registrada')
           }
+        </article>
+        <article class="panel classification-report">
+          <div class="report-card-head">
+            <div>
+              <span class="section-kicker">CLASSIFICAÇÃO DO CATÁLOGO</span>
+              <h2>Distribuição por classificação</h2>
+            </div>
+          </div>
+          <div class="classification-report-list">
+            ${['perishable', 'distilled', 'soft', 'syrup', 'disposable']
+              .map((clsKey) => {
+                const items = state.products.filter((p) => getProductClassification(p) === clsKey);
+                const val = items.reduce((s, p) => s + Number(p.quantity) * Number(p.unitCost || 0), 0);
+                let note = 'Controle de validade padrão';
+                if (clsKey === 'distilled') note = 'Validade indeterminada · sem alerta de vencimento';
+                else if (clsKey === 'soft') note = 'Controle por data de fabricação e validade';
+                else if (clsKey === 'syrup') {
+                  const openedCount = items.filter((p) => p.packageStatus === 'opened').length;
+                  const closedCount = items.length - openedCount;
+                  note = `${closedCount} fechado(s) · ${openedCount} aberto(s)`;
+                } else if (clsKey === 'disposable') note = 'Controle exclusivo de estoque · sem validade';
+                return `
+                  <div class="responsible-row">
+                    <span>
+                      <strong>${esc(CATALOG_TYPE_LABELS[clsKey])}</strong>
+                      <small>${esc(note)}</small>
+                    </span>
+                    <span>
+                      <strong>${items.length} ${items.length === 1 ? 'insumo' : 'insumos'}</strong>
+                      <small>cadastrados</small>
+                    </span>
+                    <b>${esc(money(val))}</b>
+                  </div>
+                `;
+              })
+              .join('')}
+          </div>
         </article>
       </section>
     `;
@@ -1834,21 +2157,253 @@
     `;
   }
 
+  function syncLabelDefaultsForProduct(product) {
+    if (!product) return;
+    const cls = getProductClassification(product);
+    const unitMap = { un: 'UN', kg: 'KG', g: 'G', litros: 'L', caixa: 'UN' };
+    state.labelUnit = unitMap[product.unit] || state.labelUnit || 'UN';
+    state.labelManufacturedAt = product.manufacturedAt ? String(product.manufacturedAt).slice(0, 10) : '';
+    state.labelHandledAt = product.handledAt ? String(product.handledAt).slice(0, 10) : '';
+    state.labelExpiryDate =
+      cls === 'distilled' || cls === 'disposable'
+        ? ''
+        : product.expiryDate
+          ? String(product.expiryDate).slice(0, 10)
+          : '';
+    state.labelPackageStatus = cls === 'syrup' ? (product.packageStatus === 'opened' ? 'opened' : 'closed') : 'closed';
+    state.labelQr = '';
+    state.labelPng = '';
+  }
+
+  function buildLabelModel(product) {
+    const cls = product ? getProductClassification(product) : 'perishable';
+    const classLabel = product ? getClassificationLabel(product) : 'Perecível';
+    const pkgStatus = cls === 'syrup' ? (state.labelPackageStatus === 'opened' ? 'opened' : 'closed') : null;
+    const displayQuantity = state.labelQuantity
+      ? `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 3 }).format(Number(state.labelQuantity))} ${state.labelUnit}`
+      : '—';
+    const lot = String(state.labelLot || '').trim();
+    const resp = String(state.labelResponsibleName || '').trim();
+    const shelfDays =
+      cls === 'syrup' && product?.shelfLifeAfterOpeningDays
+        ? Number(product.shelfLifeAfterOpeningDays)
+        : null;
+    const openedExpiry =
+      cls === 'syrup' && pkgStatus === 'opened'
+        ? calculateOpenedExpiryDate(state.labelHandledAt, shelfDays)
+        : null;
+    const needsShelfLifeConfig = cls === 'syrup' && pkgStatus === 'opened' && !shelfDays;
+
+    const lines = [];
+    if (cls === 'disposable') {
+      lines.push({ prefix: 'Classificação:', value: 'Descartáveis', emphasis: 'normal' });
+      lines.push({ prefix: 'Quantidade:', value: displayQuantity, emphasis: 'normal' });
+      if (product?.location) {
+        lines.push({ prefix: 'Local:', value: product.location, emphasis: 'normal' });
+      }
+      if (lot) {
+        lines.push({ prefix: 'Lote:', value: lot, emphasis: 'normal' });
+      }
+      lines.push({ prefix: 'Resp.:', value: resp || '—', emphasis: 'muted' });
+    } else if (cls === 'distilled') {
+      lines.push({ prefix: 'Quantidade:', value: displayQuantity, emphasis: 'normal' });
+      lines.push({ prefix: 'Validade:', value: 'Indeterminada', emphasis: 'expiry' });
+      if (lot) {
+        lines.push({ prefix: 'Lote:', value: lot, emphasis: 'normal' });
+      }
+      lines.push({ prefix: 'Resp.:', value: resp || '—', emphasis: 'muted' });
+    } else if (cls === 'soft') {
+      lines.push({ prefix: 'Quantidade:', value: displayQuantity, emphasis: 'normal' });
+      lines.push({
+        prefix: 'Fab.:',
+        value: state.labelManufacturedAt ? formatDate(state.labelManufacturedAt) : '—',
+        emphasis: 'normal',
+      });
+      if (state.labelExpiryDate) {
+        lines.push({ prefix: 'VAL.:', value: formatDate(state.labelExpiryDate), emphasis: 'expiry' });
+      }
+      if (lot) {
+        lines.push({ prefix: 'Lote:', value: lot, emphasis: 'normal' });
+      }
+      lines.push({ prefix: 'Resp.:', value: resp || '—', emphasis: 'muted' });
+    } else if (cls === 'syrup' && pkgStatus === 'closed') {
+      lines.push({ prefix: 'Quantidade:', value: displayQuantity, emphasis: 'normal' });
+      lines.push({
+        prefix: 'Fab.:',
+        value: state.labelManufacturedAt ? formatDate(state.labelManufacturedAt) : '—',
+        emphasis: 'normal',
+      });
+      lines.push({
+        prefix: 'VAL.:',
+        value: state.labelExpiryDate ? formatDate(state.labelExpiryDate) : '—',
+        emphasis: 'expiry',
+      });
+      if (lot) {
+        lines.push({ prefix: 'Lote:', value: lot, emphasis: 'normal' });
+      }
+      lines.push({ prefix: 'Resp.:', value: resp || '—', emphasis: 'muted' });
+    } else if (cls === 'syrup' && pkgStatus === 'opened') {
+      lines.push({ prefix: 'Quantidade:', value: displayQuantity, emphasis: 'normal' });
+      lines.push({
+        prefix: 'Fab.:',
+        value: state.labelManufacturedAt ? formatDate(state.labelManufacturedAt) : '—',
+        emphasis: 'normal',
+      });
+      lines.push({
+        prefix: 'Manip.:',
+        value: state.labelHandledAt ? formatDate(state.labelHandledAt) : '—',
+        emphasis: 'normal',
+      });
+      lines.push({
+        prefix: 'Uso até:',
+        value: openedExpiry
+          ? formatDate(openedExpiry)
+          : needsShelfLifeConfig
+            ? 'Definir prazo'
+            : '—',
+        emphasis: needsShelfLifeConfig ? 'warning' : 'expiry',
+      });
+      if (lot) {
+        lines.push({ prefix: 'Lote:', value: lot, emphasis: 'normal' });
+      }
+      lines.push({ prefix: 'Resp.:', value: resp || '—', emphasis: 'muted' });
+    } else {
+      lines.push({ prefix: 'Quantidade:', value: displayQuantity, emphasis: 'normal' });
+      lines.push({
+        prefix: 'Manip.:',
+        value: state.labelHandledAt ? formatDate(state.labelHandledAt) : '—',
+        emphasis: 'normal',
+      });
+      lines.push({
+        prefix: 'VAL.:',
+        value: state.labelExpiryDate ? formatDate(state.labelExpiryDate) : '—',
+        emphasis: 'expiry',
+      });
+      lines.push({ prefix: 'Lote:', value: lot || '—', emphasis: 'normal' });
+      lines.push({ prefix: 'Resp.:', value: resp || '—', emphasis: 'muted' });
+    }
+
+    return {
+      cls,
+      classLabel,
+      pkgStatus,
+      displayQuantity,
+      shelfDays,
+      openedExpiry,
+      needsShelfLifeConfig,
+      lines,
+    };
+  }
+
   function labelsHtml() {
     const activeProducts = state.products.filter((p) => p.active !== false);
     if (!state.labelProductId && activeProducts[0]) {
       state.labelProductId = String(activeProducts[0].id);
+      syncLabelDefaultsForProduct(activeProducts[0]);
     }
     const product = activeProducts.find((p) => String(p.id) === String(state.labelProductId));
-    const displayQuantity = state.labelQuantity
-      ? `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 3 }).format(Number(state.labelQuantity))} ${state.labelUnit}`
-      : '—';
+    const model = buildLabelModel(product);
+    const cls = model.cls;
+    const pkgStatus = model.pkgStatus;
+
+    let step = 4;
+    const nextStep = () => {
+      const current = step;
+      step += 1;
+      return current;
+    };
+
+    let dynamicDateFields = '';
+    if (cls === 'distilled') {
+      dynamicDateFields = `
+        <div class="form-info-note full-width">
+          ${icon('check', 16)}
+          <span><strong>Destilados:</strong> validade indeterminada. A etiqueta exibirá <em>Validade: Indeterminada</em>, sem data de validade ou manipulação.</span>
+        </div>
+      `;
+    } else if (cls === 'disposable') {
+      dynamicDateFields = `
+        <div class="form-info-note full-width">
+          ${icon('boxes', 16)}
+          <span><strong>Descartáveis:</strong> etiqueta exclusiva para identificação e controle de estoque (entrada e baixa), sem campos de fabricação ou validade.</span>
+        </div>
+      `;
+    } else if (cls === 'soft') {
+      dynamicDateFields = `
+        <label class="form-field">
+          <span>${nextStep()}. Data de fabricação</span>
+          <input name="manufacturedAt" type="date" data-label-field="labelManufacturedAt" value="${esc(state.labelManufacturedAt)}" required>
+        </label>
+        <label class="form-field">
+          <span>${nextStep()}. Data de validade (opcional)</span>
+          <input name="expiryDate" type="date" ${state.labelManufacturedAt ? `min="${esc(state.labelManufacturedAt)}"` : ''} data-label-field="labelExpiryDate" value="${esc(state.labelExpiryDate)}">
+        </label>
+      `;
+    } else if (cls === 'syrup') {
+      const statusField = `
+        <label class="form-field full-width">
+          <span>${nextStep()}. Estado do xarope na etiqueta</span>
+          <select name="packageStatus" data-label-field="labelPackageStatus" required>
+            <option value="closed" ${pkgStatus === 'closed' ? 'selected' : ''}>Fechado (fabricação e validade)</option>
+            <option value="opened" ${pkgStatus === 'opened' ? 'selected' : ''}>Aberto (fabricação, manipulação e limite após abertura)</option>
+          </select>
+        </label>
+      `;
+      if (pkgStatus === 'closed') {
+        dynamicDateFields = `
+          ${statusField}
+          <label class="form-field">
+            <span>${nextStep()}. Data de fabricação</span>
+            <input name="manufacturedAt" type="date" data-label-field="labelManufacturedAt" value="${esc(state.labelManufacturedAt)}" required>
+          </label>
+          <label class="form-field">
+            <span>${nextStep()}. Data de validade</span>
+            <input name="expiryDate" type="date" ${state.labelManufacturedAt ? `min="${esc(state.labelManufacturedAt)}"` : ''} data-label-field="labelExpiryDate" value="${esc(state.labelExpiryDate)}" required>
+          </label>
+        `;
+      } else {
+        const limitBanner = model.needsShelfLifeConfig
+          ? `<div class="form-warning-note full-width">
+              ${icon('triangle-alert', 16)}
+              <span><strong>Prazo após abertura não configurado:</strong> cadastre a quantidade de dias de utilização após abertura nos detalhes deste xarope. Nenhuma data fictícia será gerada.</span>
+            </div>`
+          : `<div class="form-info-note full-width">
+              ${icon('calendar-clock', 16)}
+              <span><strong>Limite após abertura (${model.shelfDays} dias):</strong> ${model.openedExpiry ? `<strong>${esc(formatDate(model.openedExpiry))}</strong>` : 'informe a data de manipulação para calcular'}${product?.expiryDate ? ` · Validade original (fechado): ${esc(formatDate(product.expiryDate))}` : ''}</span>
+            </div>`;
+        dynamicDateFields = `
+          ${statusField}
+          <label class="form-field">
+            <span>${nextStep()}. Data de fabricação</span>
+            <input name="manufacturedAt" type="date" data-label-field="labelManufacturedAt" value="${esc(state.labelManufacturedAt)}" required>
+          </label>
+          <label class="form-field">
+            <span>${nextStep()}. Data de manipulação (abertura)</span>
+            <input name="handledAt" type="date" ${state.labelManufacturedAt ? `min="${esc(state.labelManufacturedAt)}"` : ''} data-label-field="labelHandledAt" value="${esc(state.labelHandledAt)}" required>
+          </label>
+          ${limitBanner}
+        `;
+      }
+    } else {
+      dynamicDateFields = `
+        <label class="form-field">
+          <span>${nextStep()}. Data de manipulação</span>
+          <input name="handledAt" type="date" data-label-field="labelHandledAt" value="${esc(state.labelHandledAt)}" required>
+        </label>
+        <label class="form-field">
+          <span>${nextStep()}. Data de validade</span>
+          <input name="expiryDate" type="date" ${state.labelHandledAt ? `min="${esc(state.labelHandledAt)}"` : ''} data-label-field="labelExpiryDate" value="${esc(state.labelExpiryDate)}" required>
+        </label>
+      `;
+    }
+
+    const lotRequired = cls === 'perishable';
 
     return `
       ${pageTitleHtml(
         'IDENTIFICAÇÃO',
         'Criar etiquetas',
-        'Selecione o insumo e registre quantidade, datas, lote e responsável pela manipulação.'
+        'Os campos e o layout da etiqueta se adaptam automaticamente à classificação do insumo.'
       )}
       <section class="qr-layout labels-layout">
         <article class="panel qr-builder">
@@ -1856,7 +2411,7 @@
             <span>${icon('qr-code', 20)}</span>
             <div>
               <h2>Configurar etiqueta</h2>
-              <p>Os dados serão salvos e incorporados ao QR Code.</p>
+              <p>${product ? `Classificação detectada: ${esc(model.classLabel)}${cls === 'syrup' ? ` (${esc(PACKAGE_STATUS_LABELS[pkgStatus])})` : ''}.` : 'Os dados serão salvos e incorporados ao QR Code.'}</p>
             </div>
           </div>
           <form data-action="createLabel" class="qr-form" id="label-form">
@@ -1867,14 +2422,14 @@
                 ${activeProducts
                   .map(
                     (p) =>
-                      `<option value="${esc(p.id)}" ${String(state.labelProductId) === String(p.id) ? 'selected' : ''}>${esc(p.name)} · ${esc(p.code)}</option>`
+                      `<option value="${esc(p.id)}" ${String(state.labelProductId) === String(p.id) ? 'selected' : ''}>${esc(p.name)} · ${esc(p.code)} (${esc(getClassificationLabel(p))})</option>`
                   )
                   .join('')}
               </select>
             </label>
             <label class="form-field">
               <span>2. Quantidade</span>
-              <input name="quantity" type="number" min="0.001" step="0.001" data-label-field="labelQuantity" value="${esc(state.labelQuantity)}" required placeholder="Ex.: 0,300">
+              <input name="quantity" type="number" min="0.001" step="0.001" data-label-field="labelQuantity" value="${esc(state.labelQuantity)}" required placeholder="Ex.: 1">
             </label>
             <label class="form-field">
               <span>3. Unidade de medida</span>
@@ -1882,20 +2437,13 @@
                 ${LABEL_UNITS.map((u) => `<option value="${u}" ${state.labelUnit === u ? 'selected' : ''}>${u}</option>`).join('')}
               </select>
             </label>
+            ${dynamicDateFields}
             <label class="form-field">
-              <span>4. Data de manipulação</span>
-              <input name="handledAt" type="date" data-label-field="labelHandledAt" value="${esc(state.labelHandledAt)}" required>
+              <span>${nextStep()}. Lote${lotRequired ? '' : ' (opcional)'}</span>
+              <input name="lot" data-label-field="labelLot" value="${esc(state.labelLot)}" ${lotRequired ? 'required' : ''} placeholder="Ex.: L-1105">
             </label>
             <label class="form-field">
-              <span>5. Data de validade</span>
-              <input name="expiryDate" type="date" ${state.labelHandledAt ? `min="${esc(state.labelHandledAt)}"` : ''} data-label-field="labelExpiryDate" value="${esc(state.labelExpiryDate)}" required>
-            </label>
-            <label class="form-field">
-              <span>6. Lote</span>
-              <input name="lot" data-label-field="labelLot" value="${esc(state.labelLot)}" required placeholder="Ex.: L-1105">
-            </label>
-            <label class="form-field">
-              <span>7. Responsável</span>
+              <span>${nextStep()}. Responsável</span>
               <input name="responsibleName" data-label-field="labelResponsibleName" value="${esc(state.labelResponsibleName)}" required placeholder="Digite o nome">
             </label>
             <div class="label-form-actions full-width">
@@ -1909,7 +2457,7 @@
           </form>
         </article>
         <aside class="panel qr-preview-card" id="label-preview-card">
-          ${labelPreviewInnerHtml(product, displayQuantity)}
+          ${labelPreviewInnerHtml(product)}
         </aside>
       </section>
     `;
@@ -2033,13 +2581,28 @@
     });
   }
 
-  function labelPreviewInnerHtml(product, displayQuantity) {
+  function labelPreviewInnerHtml(product) {
     const productName = product?.name || 'Nome do insumo';
     const initialTitleSize = estimateLabelTitleFontSize(productName);
+    const model = buildLabelModel(product);
+    const linesHtml = model.lines
+      .map((line) => {
+        const clsName =
+          line.emphasis === 'expiry'
+            ? 'label-expiry'
+            : line.emphasis === 'warning'
+              ? 'label-expiry label-expiry--warning'
+              : line.emphasis === 'muted'
+                ? 'label-responsible'
+                : '';
+        return `<p${clsName ? ` class="${clsName}"` : ''}>${esc(line.prefix)} <strong>${esc(line.value)}</strong></p>`;
+      })
+      .join('');
+
     return `
       <div class="preview-title">
         <span>PRÉVIA DE IMPRESSÃO</span>
-        <small>Etiqueta 90 × 60 mm</small>
+        <small>Etiqueta 90 × 60 mm · ${esc(model.classLabel)}</small>
       </div>
       <div class="print-label">
         <div class="label-qr-column">
@@ -2052,11 +2615,7 @@
         </div>
         <div class="label-information">
           <h3 class="label-product-title" style="font-size: ${initialTitleSize}px" title="${esc(productName)}">${esc(productName)}</h3>
-          <p>Quantidade: <strong>${esc(displayQuantity)}</strong></p>
-          <p>Manip.: <strong>${esc(formatDate(state.labelHandledAt))}</strong></p>
-          <p class="label-expiry">VAL.: <strong>${esc(formatDate(state.labelExpiryDate))}</strong></p>
-          <p>Lote: <strong>${esc(state.labelLot || '—')}</strong></p>
-          <p class="label-responsible">Resp.: <strong>${esc(state.labelResponsibleName || '—')}</strong></p>
+          ${linesHtml}
           <footer>
             <b>SICE</b>
             <span>Allto Al Mar</span>
@@ -2066,7 +2625,7 @@
       <div class="qr-actions">
         ${
           state.labelPng
-            ? `<a class="btn btn--primary" href="${esc(state.labelPng)}" download="etiqueta-${esc(product?.name || 'insumo')}-${esc(state.labelLot || 'lote')}.png">${icon('download', 17)} Baixar PNG</a>`
+            ? `<a class="btn btn--primary" href="${esc(state.labelPng)}" download="etiqueta-${esc(product?.code || product?.name || 'insumo')}${state.labelLot ? `-${esc(state.labelLot)}` : ''}.png">${icon('download', 17)} Baixar PNG</a>`
             : `<button class="btn btn--primary" disabled type="button">${icon('download', 17)} Baixar PNG</button>`
         }
         <button class="btn btn--light" type="button" id="btn-print-label">Imprimir</button>
@@ -2125,21 +2684,57 @@
   async function generateLabelPreview() {
     const activeProducts = state.products.filter((p) => p.active !== false);
     const product = activeProducts.find((p) => String(p.id) === String(state.labelProductId));
-    if (
-      !product ||
-      !state.labelQuantity ||
-      Number(state.labelQuantity) <= 0 ||
-      !state.labelHandledAt ||
-      !state.labelExpiryDate ||
-      !state.labelLot.trim() ||
-      !state.labelResponsibleName.trim()
-    ) {
-      showToast('Preencha todos os campos para gerar a prévia.');
+    const model = buildLabelModel(product);
+    const cls = model.cls;
+    const pkgStatus = model.pkgStatus;
+
+    if (!product || !state.labelQuantity || Number(state.labelQuantity) <= 0 || !state.labelResponsibleName.trim()) {
+      showToast('Preencha insumo, quantidade e responsável para gerar a prévia.');
       return;
     }
-    if (state.labelExpiryDate < state.labelHandledAt) {
-      showToast('A validade não pode ser anterior à manipulação.');
-      return;
+
+    if (cls === 'perishable') {
+      if (!state.labelHandledAt || !state.labelExpiryDate || !state.labelLot.trim()) {
+        showToast('Preencha data de manipulação, validade e lote para produto perecível.');
+        return;
+      }
+      if (state.labelExpiryDate < state.labelHandledAt) {
+        showToast('A validade não pode ser anterior à manipulação.');
+        return;
+      }
+    } else if (cls === 'soft') {
+      if (!state.labelManufacturedAt) {
+        showToast('Informe a data de fabricação para produto Soft.');
+        return;
+      }
+      if (state.labelExpiryDate && state.labelExpiryDate < state.labelManufacturedAt) {
+        showToast('A validade não pode ser anterior à data de fabricação.');
+        return;
+      }
+    } else if (cls === 'syrup') {
+      if (!state.labelManufacturedAt) {
+        showToast('Informe a data de fabricação do xarope.');
+        return;
+      }
+      if (pkgStatus === 'closed') {
+        if (!state.labelExpiryDate) {
+          showToast('Informe a data de validade do xarope fechado.');
+          return;
+        }
+        if (state.labelExpiryDate < state.labelManufacturedAt) {
+          showToast('A validade não pode ser anterior à data de fabricação.');
+          return;
+        }
+      } else {
+        if (!state.labelHandledAt) {
+          showToast('Informe a data de manipulação (abertura) do xarope aberto.');
+          return;
+        }
+        if (state.labelHandledAt < state.labelManufacturedAt) {
+          showToast('A data de manipulação não pode ser anterior à data de fabricação.');
+          return;
+        }
+      }
     }
 
     const qrLib = await ensureQrCodeLibrary();
@@ -2152,13 +2747,32 @@
       productId: product.id,
       productCode: product.code,
       productName: product.name,
+      classification: cls,
       quantity: Number(state.labelQuantity),
       unit: state.labelUnit,
-      handledAt: state.labelHandledAt,
-      expiryDate: state.labelExpiryDate,
-      lot: state.labelLot.trim(),
       responsibleName: state.labelResponsibleName.trim(),
     };
+    if (state.labelLot.trim()) payload.lot = state.labelLot.trim();
+    if (cls === 'distilled') {
+      payload.expiry = 'Indeterminada';
+    } else if (cls === 'disposable') {
+      payload.location = product.location;
+    } else if (cls === 'soft') {
+      payload.manufacturedAt = state.labelManufacturedAt;
+      if (state.labelExpiryDate) payload.expiryDate = state.labelExpiryDate;
+    } else if (cls === 'syrup') {
+      payload.packageStatus = pkgStatus;
+      payload.manufacturedAt = state.labelManufacturedAt;
+      if (pkgStatus === 'closed') {
+        payload.expiryDate = state.labelExpiryDate;
+      } else {
+        payload.handledAt = state.labelHandledAt;
+        if (model.openedExpiry) payload.openedExpiryDate = model.openedExpiry;
+      }
+    } else {
+      payload.handledAt = state.labelHandledAt;
+      payload.expiryDate = state.labelExpiryDate;
+    }
 
     try {
       const qrData = await qrLib.toDataURL(JSON.stringify(payload), {
@@ -2168,7 +2782,6 @@
       });
       state.labelQr = qrData;
 
-      const displayQuantity = `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 3 }).format(Number(state.labelQuantity))} ${state.labelUnit}`;
       const canvas = document.createElement('canvas');
       canvas.width = 1350;
       canvas.height = 900;
@@ -2186,16 +2799,32 @@
 
         ctx.textAlign = 'left';
         ctx.fillStyle = '#111111';
-        drawFittedCanvasTitle(ctx, product.name, 635, 58, 650, 128);
-        ctx.font = '400 48px sans-serif';
-        ctx.fillText(`Quantidade: ${displayQuantity}`, 635, 240);
-        ctx.fillText(`Manip.: ${formatDate(state.labelHandledAt)}`, 635, 325);
-        ctx.font = '700 52px sans-serif';
-        ctx.fillText(`VAL.: ${formatDate(state.labelExpiryDate)}`, 635, 415);
-        ctx.font = '400 44px sans-serif';
-        ctx.fillText(`Lote: ${state.labelLot.trim()}`, 635, 500);
-        ctx.fillStyle = '#555555';
-        ctx.fillText(`Resp.: ${state.labelResponsibleName.trim()}`, 635, 580);
+        drawFittedCanvasTitle(ctx, product.name, 635, 52, 655, 126);
+
+        const lineCount = model.lines.length;
+        const topStartY = 228;
+        const bottomMaxY = 640;
+        const stepY = lineCount > 1 ? Math.min(86, Math.floor((bottomMaxY - topStartY) / (lineCount - 1))) : 80;
+        const baseFont = lineCount >= 6 ? 40 : 46;
+
+        model.lines.forEach((line, idx) => {
+          const y = topStartY + idx * stepY;
+          if (line.emphasis === 'expiry') {
+            ctx.fillStyle = '#111111';
+            ctx.font = `700 ${baseFont + 4}px sans-serif`;
+          } else if (line.emphasis === 'warning') {
+            ctx.fillStyle = '#9a6114';
+            ctx.font = `700 ${baseFont + 2}px sans-serif`;
+          } else if (line.emphasis === 'muted') {
+            ctx.fillStyle = '#555555';
+            ctx.font = `400 ${baseFont - 2}px sans-serif`;
+          } else {
+            ctx.fillStyle = '#111111';
+            ctx.font = `400 ${baseFont}px sans-serif`;
+          }
+          ctx.fillText(`${line.prefix} ${line.value}`, 635, y, 660);
+        });
+
         ctx.strokeStyle = '#d5d5d5';
         ctx.lineWidth = 3;
         ctx.beginPath();
@@ -2213,7 +2842,7 @@
 
       const preview = document.getElementById('label-preview-card');
       if (preview) {
-        preview.innerHTML = labelPreviewInnerHtml(product, displayQuantity);
+        preview.innerHTML = labelPreviewInnerHtml(product);
         refreshIcons();
         fitLabelTitle();
       }
@@ -2667,8 +3296,245 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Drawer de Detalhes do Produto & Modal de Cadastro/Movimentação
+  // Campos dinâmicos por categoria/classificação + Drawer & Modais
   // ---------------------------------------------------------------------------
+  function productDynamicControlFieldsHtml({
+    mode = 'create',
+    category = 'Hortifrutti',
+    catalogType = 'distilled',
+    packageStatus = 'closed',
+    purchasedAt = '',
+    manufacturedAt = '',
+    handledAt = '',
+    expiryDate = '',
+    expiry = '',
+    shelfLifeAfterOpeningDays = '',
+  } = {}) {
+    const normCat = normalizeCategoryName(category);
+    const isBeverage = normCat === 'Bebidas';
+    const effectiveType = isBeverage
+      ? BEVERAGE_CLASSIFICATIONS.includes(catalogType)
+        ? catalogType
+        : 'distilled'
+      : resolveCatalogType(normCat, catalogType) || 'perishable';
+    const pkgStatus = packageStatus === 'opened' ? 'opened' : 'closed';
+    const today = new Date().toISOString().slice(0, 10);
+
+    let classificationField = '';
+    if (isBeverage) {
+      classificationField = `
+        <label class="form-field">
+          <span>Classificação</span>
+          <select name="catalogType" data-product-dynamic="catalogType" required>
+            <option value="distilled" ${effectiveType === 'distilled' ? 'selected' : ''}>Destilados</option>
+            <option value="soft" ${effectiveType === 'soft' ? 'selected' : ''}>Soft</option>
+            <option value="syrup" ${effectiveType === 'syrup' ? 'selected' : ''}>Xaropes</option>
+          </select>
+        </label>
+      `;
+    } else if (mode === 'edit') {
+      classificationField = `
+        <input type="hidden" name="catalogType" value="${esc(effectiveType)}">
+        <div class="form-field">
+          <span>Classificação (automática)</span>
+          <div class="readonly-pill">${esc(CATALOG_TYPE_LABELS[effectiveType] || effectiveType)}</div>
+        </div>
+      `;
+    } else {
+      // No cadastro de novo insumo, categorias com classificação única atribuem automaticamente sem exibir o campo
+      classificationField = `<input type="hidden" name="catalogType" value="${esc(effectiveType)}">`;
+    }
+
+    let controlFields = '';
+    if (effectiveType === 'disposable') {
+      controlFields = `
+        <div class="form-info-note full-width">
+          ${icon('boxes', 16)}
+          <span><strong>Descartáveis:</strong> sem controle de validade, fabricação ou manipulação. O controle é exclusivo para estoque e etiquetas de identificação.</span>
+        </div>
+      `;
+    } else if (effectiveType === 'distilled') {
+      controlFields = `
+        <div class="form-info-note full-width">
+          ${icon('check', 16)}
+          <span><strong>Validade: Indeterminada.</strong> Destilados não solicitam data de validade e não geram alertas de vencimento.</span>
+        </div>
+        ${
+          mode === 'create'
+            ? `
+          <label class="form-field">
+            <span>Data da compra</span>
+            <input name="purchasedAt" type="date" value="${esc(purchasedAt)}">
+          </label>
+        `
+            : ''
+        }
+        <label class="form-field ${mode === 'edit' ? 'full-width' : ''}">
+          <span>Observação</span>
+          <input name="expiry" value="${esc(expiry)}" placeholder="Ex.: armazenar ao abrigo da luz">
+        </label>
+      `;
+    } else if (effectiveType === 'soft') {
+      controlFields = `
+        <label class="form-field">
+          <span>Data de fabricação</span>
+          <input name="manufacturedAt" type="date" value="${esc(manufacturedAt)}" ${mode === 'create' ? 'required' : ''}>
+        </label>
+        <label class="form-field">
+          <span>Data de validade</span>
+          <input name="expiryDate" type="date" value="${esc(expiryDate)}">
+        </label>
+        ${
+          mode === 'create'
+            ? `
+          <label class="form-field">
+            <span>Data da compra</span>
+            <input name="purchasedAt" type="date" value="${esc(purchasedAt)}">
+          </label>
+        `
+            : ''
+        }
+        <label class="form-field ${mode === 'edit' ? 'full-width' : ''}">
+          <span>Observação</span>
+          <input name="expiry" value="${esc(expiry)}" placeholder="Ex.: manter refrigerado">
+        </label>
+      `;
+    } else if (effectiveType === 'syrup') {
+      const shelfNum = Number(shelfLifeAfterOpeningDays);
+      const openedPreview =
+        pkgStatus === 'opened'
+          ? calculateOpenedExpiryDate(handledAt || today, Number.isInteger(shelfNum) && shelfNum > 0 ? shelfNum : null)
+          : null;
+      const openedBanner =
+        pkgStatus === 'opened'
+          ? openedPreview
+            ? `
+              <div class="form-info-note full-width" data-syrup-limit-preview>
+                ${icon('calendar-clock', 16)}
+                <span><strong>Limite após abertura:</strong> ${esc(formatDate(openedPreview))} (${esc(shelfNum)} dias a partir da manipulação).</span>
+              </div>
+            `
+            : `
+              <div class="form-warning-note full-width" data-syrup-limit-preview>
+                ${icon('triangle-alert', 16)}
+                <span><strong>Prazo após abertura não definido:</strong> informe a quantidade de dias após abertura para calcular o limite, sem gerar data fictícia.</span>
+              </div>
+            `
+          : '';
+
+      controlFields = `
+        <label class="form-field">
+          <span>Estado do xarope</span>
+          <select name="packageStatus" data-product-dynamic="packageStatus" required>
+            <option value="closed" ${pkgStatus === 'closed' ? 'selected' : ''}>Fechado</option>
+            <option value="opened" ${pkgStatus === 'opened' ? 'selected' : ''}>Aberto</option>
+          </select>
+        </label>
+        <label class="form-field">
+          <span>Prazo após abertura (dias)</span>
+          <input name="shelfLifeAfterOpeningDays" type="number" min="1" step="1" data-product-dynamic="shelfLifeAfterOpeningDays" value="${esc(shelfLifeAfterOpeningDays)}" placeholder="Definir dias por produto">
+        </label>
+        <label class="form-field">
+          <span>Data de fabricação</span>
+          <input name="manufacturedAt" type="date" value="${esc(manufacturedAt)}" required>
+        </label>
+        <label class="form-field">
+          <span>Validade (produto fechado)</span>
+          <input name="expiryDate" type="date" value="${esc(expiryDate)}" ${pkgStatus === 'closed' ? 'required' : ''}>
+        </label>
+        ${
+          pkgStatus === 'opened'
+            ? `
+          <label class="form-field">
+            <span>Data de manipulação (abertura)</span>
+            <input name="handledAt" type="date" data-product-dynamic="handledAt" value="${esc(handledAt || today)}" required>
+          </label>
+        `
+            : ''
+        }
+        ${
+          mode === 'create'
+            ? `
+          <label class="form-field">
+            <span>Data da compra</span>
+            <input name="purchasedAt" type="date" value="${esc(purchasedAt)}">
+          </label>
+        `
+            : ''
+        }
+        ${openedBanner}
+        <label class="form-field full-width">
+          <span>Observação</span>
+          <input name="expiry" value="${esc(expiry)}" placeholder="Ex.: conservar fechado em local fresco">
+        </label>
+      `;
+    } else {
+      // Perecível (Carnes e pescados, Laticínios e frios, Hortifrutti)
+      controlFields = `
+        ${
+          mode === 'create'
+            ? `
+          <label class="form-field">
+            <span>Data da compra</span>
+            <input name="purchasedAt" type="date" value="${esc(purchasedAt)}">
+          </label>
+        `
+            : ''
+        }
+        <label class="form-field">
+          <span>Data de validade</span>
+          <input name="expiryDate" type="date" value="${esc(expiryDate)}">
+        </label>
+        <label class="form-field ${mode === 'create' ? 'full-width' : ''}">
+          <span>Observação de validade</span>
+          <input name="expiry" value="${esc(expiry)}" placeholder="Ex.: consumir em até 3 dias">
+        </label>
+      `;
+    }
+
+    return `${classificationField}${controlFields}`;
+  }
+
+  function entryDynamicDateFieldsHtml(product) {
+    const cls = product ? getProductClassification(product) : 'perishable';
+    const rules = getClassificationRules(cls);
+
+    if (cls === 'distilled') {
+      return `
+        <div class="form-info-note full-width">
+          ${icon('check', 16)}
+          <span><strong>Destilados:</strong> validade indeterminada (nenhuma data de validade solicitada).</span>
+        </div>
+      `;
+    }
+    if (cls === 'disposable') {
+      return `
+        <div class="form-info-note full-width">
+          ${icon('boxes', 16)}
+          <span><strong>Descartáveis:</strong> sem controle de validade ou fabricação.</span>
+        </div>
+      `;
+    }
+    let html = '';
+    if (rules.usesManufacturedAt) {
+      html += `
+        <label class="form-field">
+          <span>Data de fabricação</span>
+          <input name="manufacturedAt" type="date">
+        </label>
+      `;
+    }
+    if (rules.hasExpiry) {
+      html += `
+        <label class="form-field">
+          <span>Data de validade</span>
+          <input name="expiryDate" type="date">
+        </label>
+      `;
+    }
+    return html;
+  }
+
   function productDetailDrawerHtml(product, canManage) {
     const lastEntry = state.movements.find(
       (m) =>
@@ -2677,6 +3543,328 @@
     );
     const purchaseDate = product.purchasedAt || lastEntry?.createdAt || product.createdAt;
     const nextActive = product.active === false;
+    const cls = getProductClassification(product);
+    const rules = getClassificationRules(cls);
+    const classLabel = getClassificationLabel(product);
+    const expiryInfo = getEffectiveExpiryInfo(product);
+    const isSyrup = cls === 'syrup';
+    const syrupOpened = isSyrup && product.packageStatus === 'opened';
+    const syrupHistory = isSyrup ? getProductStateHistory(product.id) : [];
+    const today = new Date().toISOString().slice(0, 10);
+
+    let detailItemsHtml = '';
+    if (cls === 'distilled') {
+      detailItemsHtml = `
+        <div>
+          <span>Classificação</span>
+          <strong>${esc(classLabel)}</strong>
+        </div>
+        <div>
+          <span>Validade</span>
+          <strong>Indeterminada</strong>
+        </div>
+        <div>
+          <span>Comprado em</span>
+          <strong>${esc(formatDate(purchaseDate))}</strong>
+        </div>
+        <div>
+          <span>Localização</span>
+          <strong>${esc(product.location)}</strong>
+        </div>
+        <div>
+          <span>Último fornecedor</span>
+          <strong>${esc(lastEntry?.supplier || 'Não informado')}</strong>
+        </div>
+        ${canManage ? `<div><span>Custo unitário</span><strong>${esc(money(product.unitCost || 0))}</strong></div>` : ''}
+      `;
+    } else if (cls === 'disposable') {
+      detailItemsHtml = `
+        <div>
+          <span>Classificação</span>
+          <strong>${esc(classLabel)}</strong>
+        </div>
+        <div>
+          <span>Controle de validade</span>
+          <strong>Não aplicável</strong>
+        </div>
+        <div>
+          <span>Localização</span>
+          <strong>${esc(product.location)}</strong>
+        </div>
+        <div>
+          <span>Último fornecedor</span>
+          <strong>${esc(lastEntry?.supplier || 'Não informado')}</strong>
+        </div>
+        ${canManage ? `<div><span>Custo unitário</span><strong>${esc(money(product.unitCost || 0))}</strong></div>` : ''}
+      `;
+    } else if (cls === 'soft') {
+      detailItemsHtml = `
+        <div>
+          <span>Classificação</span>
+          <strong>${esc(classLabel)}</strong>
+        </div>
+        <div>
+          <span>Data de fabricação</span>
+          <strong>${esc(formatDate(product.manufacturedAt))}</strong>
+        </div>
+        <div>
+          <span>Validade</span>
+          <strong>${esc(expiryInfo.displayText)}</strong>
+        </div>
+        <div>
+          <span>Comprado em</span>
+          <strong>${esc(formatDate(purchaseDate))}</strong>
+        </div>
+        <div>
+          <span>Localização</span>
+          <strong>${esc(product.location)}</strong>
+        </div>
+        <div>
+          <span>Último fornecedor</span>
+          <strong>${esc(lastEntry?.supplier || 'Não informado')}</strong>
+        </div>
+        ${canManage ? `<div><span>Custo unitário</span><strong>${esc(money(product.unitCost || 0))}</strong></div>` : ''}
+      `;
+    } else if (cls === 'syrup') {
+      detailItemsHtml = `
+        <div>
+          <span>Classificação</span>
+          <strong>${esc(classLabel)}</strong>
+        </div>
+        <div>
+          <span>Estado atual</span>
+          <strong>${syrupOpened ? 'Aberto' : 'Fechado'}</strong>
+        </div>
+        <div>
+          <span>Data de fabricação</span>
+          <strong>${esc(formatDate(product.manufacturedAt))}</strong>
+        </div>
+        <div>
+          <span>Validade (fechado)</span>
+          <strong>${esc(formatDate(product.expiryDate))}</strong>
+        </div>
+        <div>
+          <span>Prazo após abertura</span>
+          <strong>${product.shelfLifeAfterOpeningDays ? `${esc(product.shelfLifeAfterOpeningDays)} dias` : 'Não configurado'}</strong>
+        </div>
+        ${
+          syrupOpened
+            ? `
+          <div>
+            <span>Data de manipulação</span>
+            <strong>${esc(formatDate(product.handledAt))}</strong>
+          </div>
+          <div>
+            <span>Limite após abertura</span>
+            <strong class="${expiryInfo.needsShelfLifeConfig ? 'expiry-pending-text' : ''}">${esc(expiryInfo.displayText)}</strong>
+          </div>
+        `
+            : ''
+        }
+        <div>
+          <span>Localização</span>
+          <strong>${esc(product.location)}</strong>
+        </div>
+        <div>
+          <span>Último fornecedor</span>
+          <strong>${esc(lastEntry?.supplier || 'Não informado')}</strong>
+        </div>
+        ${canManage ? `<div><span>Custo unitário</span><strong>${esc(money(product.unitCost || 0))}</strong></div>` : ''}
+      `;
+    } else {
+      detailItemsHtml = `
+        <div>
+          <span>Classificação</span>
+          <strong>${esc(classLabel)}</strong>
+        </div>
+        <div>
+          <span>Validade</span>
+          <strong>${esc(expiryInfo.displayText)}</strong>
+        </div>
+        <div>
+          <span>Comprado em</span>
+          <strong>${esc(formatDate(purchaseDate))}</strong>
+        </div>
+        <div>
+          <span>Localização</span>
+          <strong>${esc(product.location)}</strong>
+        </div>
+        <div>
+          <span>Último fornecedor</span>
+          <strong>${esc(lastEntry?.supplier || 'Não informado')}</strong>
+        </div>
+        ${canManage ? `<div><span>Custo unitário</span><strong>${esc(money(product.unitCost || 0))}</strong></div>` : ''}
+      `;
+    }
+
+    let orientationCardHtml = '';
+    if (cls === 'distilled') {
+      orientationCardHtml = `
+        <div class="lot-card lot-card--neutral">
+          <div>
+            <span>Controle de validade</span>
+            <strong>Validade indeterminada</strong>
+          </div>
+          <small>Destilados não geram alertas de vencimento nem exigem data de validade.</small>
+        </div>
+      `;
+    } else if (cls === 'disposable') {
+      orientationCardHtml = `
+        <div class="lot-card lot-card--neutral">
+          <div>
+            <span>Controle de estoque</span>
+            <strong>Material descartável</strong>
+          </div>
+          <small>Sem controle de validade, fabricação ou manipulação. Utilize etiquetas para identificação e controle de entradas/baixas.</small>
+        </div>
+      `;
+    } else if (isSyrup && expiryInfo.needsShelfLifeConfig) {
+      orientationCardHtml = `
+        <div class="lot-card lot-card--warning">
+          <div>
+            <span>Prazo após abertura pendente</span>
+            <strong>Configuração necessária</strong>
+          </div>
+          <small>Este xarope está aberto, mas ainda não possui quantidade de dias de utilização após abertura definida. Configure abaixo para calcular o limite real.</small>
+        </div>
+      `;
+    } else {
+      orientationCardHtml = `
+        <div class="lot-card">
+          <div>
+            <span>Orientação PVPS</span>
+            <strong>${expiresSoon(product) ? 'Utilizar primeiro' : 'Prazo confortável'}</strong>
+          </div>
+          <div class="lot-progress">
+            <i style="width: ${expiresSoon(product) ? '86%' : '38%'}"></i>
+          </div>
+          <small>${syrupOpened ? 'Após abertura, considere o limite calculado a partir da data de manipulação.' : 'Confira sempre a data impressa na embalagem.'}</small>
+        </div>
+      `;
+    }
+
+    const syrupControlHtml = isSyrup
+      ? `
+        <section class="syrup-control-card">
+          <div class="syrup-control-head">
+            <div>
+              <span>CONTROLE DE XAROPE</span>
+              <strong>${syrupOpened ? 'Xarope aberto em uso' : 'Xarope fechado'}</strong>
+            </div>
+            <span class="syrup-badge syrup-badge--${syrupOpened ? 'opened' : 'closed'}">
+              ${syrupOpened ? 'Aberto' : 'Fechado'}
+            </span>
+          </div>
+          ${
+            !syrupOpened
+              ? `
+            <form data-action="updateSyrupState" class="syrup-state-form">
+              <input type="hidden" name="id" value="${esc(product.id)}">
+              <input type="hidden" name="mode" value="open">
+              <div class="form-grid">
+                <label class="form-field">
+                  <span>Data de manipulação (abertura)</span>
+                  <input name="handledAt" type="date" value="${today}" ${product.manufacturedAt ? `min="${esc(String(product.manufacturedAt).slice(0, 10))}"` : ''} required>
+                </label>
+                <label class="form-field">
+                  <span>Prazo após abertura (dias)</span>
+                  <input name="shelfLifeAfterOpeningDays" type="number" min="1" step="1" value="${esc(product.shelfLifeAfterOpeningDays ?? '')}" placeholder="Ex.: 30">
+                </label>
+                <label class="form-field full-width">
+                  <span>Observação da abertura (opcional)</span>
+                  <input name="notes" placeholder="Ex.: aberto para turno do bar">
+                </label>
+              </div>
+              <button class="btn btn--primary" type="submit">
+                ${icon('check', 16)} Registrar abertura do xarope
+              </button>
+            </form>
+          `
+              : `
+            <div class="syrup-opened-summary">
+              <p>Fabricação preservada: <strong>${esc(formatDate(product.manufacturedAt))}</strong> · Validade fechado: <strong>${esc(formatDate(product.expiryDate))}</strong></p>
+              <p>Manipulação (abertura): <strong>${esc(formatDate(product.handledAt))}</strong> · Limite após abertura: <strong>${esc(expiryInfo.displayText)}</strong></p>
+            </div>
+            <form data-action="updateSyrupState" class="syrup-state-form">
+              <input type="hidden" name="id" value="${esc(product.id)}">
+              <input type="hidden" name="mode" value="configure_shelf_life">
+              <div class="form-grid">
+                <label class="form-field">
+                  <span>Prazo após abertura (dias)</span>
+                  <input name="shelfLifeAfterOpeningDays" type="number" min="1" step="1" value="${esc(product.shelfLifeAfterOpeningDays ?? '')}" required placeholder="Informar dias">
+                </label>
+                <label class="form-field">
+                  <span>Observação (opcional)</span>
+                  <input name="notes" placeholder="Ex.: conforme rótulo do fabricante">
+                </label>
+              </div>
+              <button class="btn btn--light" type="submit">
+                ${product.shelfLifeAfterOpeningDays ? 'Atualizar prazo após abertura' : 'Definir prazo após abertura'}
+              </button>
+            </form>
+            <details class="record-editor syrup-close-editor">
+              <summary>Registrar novo frasco fechado</summary>
+              <form data-action="updateSyrupState">
+                <input type="hidden" name="id" value="${esc(product.id)}">
+                <input type="hidden" name="mode" value="close">
+                <div class="form-grid">
+                  <label class="form-field">
+                    <span>Data de fabricação</span>
+                    <input name="manufacturedAt" type="date" value="${esc((product.manufacturedAt || '').slice(0, 10))}">
+                  </label>
+                  <label class="form-field">
+                    <span>Validade (fechado)</span>
+                    <input name="expiryDate" type="date" value="${esc((product.expiryDate || '').slice(0, 10))}">
+                  </label>
+                  <label class="form-field full-width">
+                    <span>Observação</span>
+                    <input name="notes" placeholder="Ex.: novo frasco lacrado em estoque">
+                  </label>
+                </div>
+                <button class="btn btn--primary" type="submit">Confirmar estado fechado</button>
+              </form>
+            </details>
+          `
+          }
+          ${
+            syrupHistory.length
+              ? `
+            <div class="syrup-history">
+              <span>HISTÓRICO DE ABERTURA E ESTADO</span>
+              <ul>
+                ${syrupHistory
+                  .slice(0, 6)
+                  .map((ev) => {
+                    const evLabel =
+                      ev.eventType === 'opened'
+                        ? 'Abertura registrada'
+                        : ev.eventType === 'closed'
+                          ? 'Novo frasco fechado'
+                          : 'Prazo após abertura atualizado';
+                    const details = [];
+                    if (ev.handledAt) details.push(`Manip.: ${formatDate(ev.handledAt)}`);
+                    if (ev.openedExpiryDate) details.push(`Uso até: ${formatDate(ev.openedExpiryDate)}`);
+                    else if (ev.eventType === 'opened' && !ev.shelfLifeAfterOpeningDays) details.push('Prazo pendente');
+                    if (ev.originalExpiryDate) details.push(`Val. fechado: ${formatDate(ev.originalExpiryDate)}`);
+                    return `
+                      <li>
+                        <div>
+                          <strong>${esc(evLabel)}</strong>
+                          <small>${esc(details.join(' · ') || 'Registro rastreável')}${ev.notes ? ` · ${esc(ev.notes)}` : ''}</small>
+                        </div>
+                        <time>${esc(ev.createdBy?.name || 'Usuário')} · ${esc(formatLocalDate(ev.createdAt))}</time>
+                      </li>
+                    `;
+                  })
+                  .join('')}
+              </ul>
+            </div>
+          `
+              : ''
+          }
+        </section>
+      `
+      : '';
 
     return `
       <button class="drawer-backdrop" type="button" data-close-drawer aria-label="Fechar detalhes"></button>
@@ -2693,7 +3881,7 @@
         <div class="detail-hero" style="--accent: ${esc(product.accent || '#376759')}">
           <span>${icon('boxes', 30)}</span>
           <div>
-            <small>${esc(product.category)}</small>
+            <small>${esc(inventoryGroup(product))} · ${esc(classLabel)}</small>
             <h2>${esc(product.name)}</h2>
             <span class="status status--${esc(product.status)}">
               <i></i>
@@ -2712,42 +3900,10 @@
           </div>
         </div>
         <div class="detail-grid">
-          <div>
-            <span>Comprado em</span>
-            <strong>${esc(formatDate(purchaseDate))}</strong>
-          </div>
-          <div>
-            <span>Vencimento</span>
-            <strong>${esc(product.expiryDate ? formatDate(product.expiryDate) : product.expiry || 'Não informado')}</strong>
-          </div>
-          <div>
-            <span>Localização</span>
-            <strong>${esc(product.location)}</strong>
-          </div>
-          <div>
-            <span>Último fornecedor</span>
-            <strong>${esc(lastEntry?.supplier || 'Não informado')}</strong>
-          </div>
-          ${
-            canManage
-              ? `<div><span>Custo unitário</span><strong>${esc(money(product.unitCost || 0))}</strong></div>`
-              : ''
-          }
-          <div>
-            <span>Classificação do catálogo</span>
-            <strong>${esc(product.catalogType ? CATALOG_TYPE_LABELS[product.catalogType] : 'Classificação pendente')}</strong>
-          </div>
+          ${detailItemsHtml}
         </div>
-        <div class="lot-card">
-          <div>
-            <span>Orientação PVPS</span>
-            <strong>${expiresSoon(product) ? 'Utilizar primeiro' : 'Prazo confortável'}</strong>
-          </div>
-          <div class="lot-progress">
-            <i style="width: ${expiresSoon(product) ? '86%' : '38%'}"></i>
-          </div>
-          <small>Confira sempre a data impressa na embalagem.</small>
-        </div>
+        ${orientationCardHtml}
+        ${syrupControlHtml}
         <div class="drawer-actions ${!canManage ? 'drawer-actions--single' : ''}">
           ${
             canManage
@@ -2765,7 +3921,7 @@
             ? `
           <details class="record-editor product-editor">
             <summary>Editar cadastro do insumo</summary>
-            <form data-action="updateProduct">
+            <form data-action="updateProduct" data-product-form="edit">
               <input type="hidden" name="id" value="${esc(product.id)}">
               <div class="form-grid">
                 <label class="form-field full-width">
@@ -2778,17 +3934,8 @@
                 </label>
                 <label class="form-field">
                   <span>Categoria</span>
-                  <select name="category">
-                    ${INVENTORY_GROUPS.map((g) => `<option ${inventoryGroup(product) === g ? 'selected' : ''}>${esc(g)}</option>`).join('')}
-                  </select>
-                </label>
-                <label class="form-field">
-                  <span>Classificação do catálogo</span>
-                  <select name="catalogType">
-                    <option value="">Selecione</option>
-                    ${Object.entries(CATALOG_TYPE_LABELS)
-                      .map(([v, l]) => `<option value="${v}" ${product.catalogType === v ? 'selected' : ''}>${esc(l)}</option>`)
-                      .join('')}
+                  <select name="category" data-product-dynamic="category">
+                    ${INVENTORY_GROUPS.map((g) => `<option value="${esc(g)}" ${inventoryGroup(product) === g ? 'selected' : ''}>${esc(g)}</option>`).join('')}
                   </select>
                 </label>
                 <label class="form-field">
@@ -2798,7 +3945,7 @@
                 <label class="form-field">
                   <span>Unidade</span>
                   <select name="unit">
-                    ${UNITS.map((u) => `<option ${product.unit === u ? 'selected' : ''}>${u}</option>`).join('')}
+                    ${UNITS.map((u) => `<option value="${u}" ${product.unit === u ? 'selected' : ''}>${u}</option>`).join('')}
                   </select>
                 </label>
                 <label class="form-field">
@@ -2809,14 +3956,19 @@
                   <span>Custo unitário</span>
                   <input name="unitCost" type="number" min="0" step="0.01" value="${esc(product.unitCost || 0)}">
                 </label>
-                <label class="form-field">
-                  <span>Vencimento</span>
-                  <input name="expiryDate" type="date" value="${esc((product.expiryDate || '').slice(0, 10))}">
-                </label>
-                <label class="form-field">
-                  <span>Observação</span>
-                  <input name="expiry" value="${esc(product.expiry || '')}">
-                </label>
+                <div class="form-grid-contents" data-product-dynamic-container>
+                  ${productDynamicControlFieldsHtml({
+                    mode: 'edit',
+                    category: inventoryGroup(product),
+                    catalogType: cls,
+                    packageStatus: product.packageStatus || 'closed',
+                    manufacturedAt: (product.manufacturedAt || '').slice(0, 10),
+                    handledAt: (product.handledAt || '').slice(0, 10),
+                    expiryDate: (product.expiryDate || '').slice(0, 10),
+                    expiry: product.expiry || '',
+                    shelfLifeAfterOpeningDays: product.shelfLifeAfterOpeningDays ?? '',
+                  })}
+                </div>
               </div>
               <button class="btn btn--primary" type="submit">Salvar ${icon('arrow-right', 16)}</button>
             </form>
@@ -2880,7 +4032,7 @@
               ${icon('x', 20)}
             </button>
           </div>
-          <form data-action="${isProduct ? 'createProduct' : 'createMovement'}">
+          <form data-action="${isProduct ? 'createProduct' : 'createMovement'}" ${isProduct ? 'data-product-form="create"' : ''}>
             <div
               id="modal-error-banner"
               class="modal-error-banner"
@@ -2902,16 +4054,8 @@
                 </label>
                 <label class="form-field">
                   <span>Categoria</span>
-                  <select name="category" required>
-                    ${INVENTORY_GROUPS.map((g) => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
-                  </select>
-                </label>
-                <label class="form-field">
-                  <span>Classificação do catálogo</span>
-                  <select name="catalogType" required>
-                    ${Object.entries(CATALOG_TYPE_LABELS)
-                      .map(([v, l]) => `<option value="${v}">${esc(l)}</option>`)
-                      .join('')}
+                  <select name="category" data-product-dynamic="category" required>
+                    ${INVENTORY_GROUPS.map((g) => `<option value="${esc(g)}" ${state.productFormCategory === g ? 'selected' : ''}>${esc(g)}</option>`).join('')}
                   </select>
                 </label>
                 <label class="form-field">
@@ -2936,18 +4080,16 @@
                   <span>Custo unitário</span>
                   <input name="unitCost" type="number" min="0" step="any" placeholder="0,00">
                 </label>
-                <label class="form-field">
-                  <span>Data da compra</span>
-                  <input name="purchasedAt" type="date">
-                </label>
-                <label class="form-field">
-                  <span>Data de vencimento</span>
-                  <input name="expiryDate" type="date">
-                </label>
-                <label class="form-field full-width">
-                  <span>Observação de validade</span>
-                  <input name="expiry" placeholder="Ex.: consumir em até 30 dias">
-                </label>
+                <div class="form-grid-contents" data-product-dynamic-container>
+                  ${productDynamicControlFieldsHtml({
+                    mode: 'create',
+                    category: state.productFormCategory,
+                    catalogType: state.productFormCatalogType,
+                    packageStatus: state.productFormPackageStatus,
+                    handledAt: state.productFormHandledAt,
+                    shelfLifeAfterOpeningDays: state.productFormShelfLifeDays,
+                  })}
+                </div>
               </div>
             `
                 : `
@@ -2959,7 +4101,7 @@
                     ${selectableProducts
                       .map(
                         (p) =>
-                          `<option value="${esc(p.id)}" data-unit="${esc(p.unit)}" ${String(state.movementProduct) === String(p.id) ? 'selected' : ''}>${esc(p.name)} · Saldo: ${esc(p.quantity)} ${esc(p.unit)}</option>`
+                          `<option value="${esc(p.id)}" data-unit="${esc(p.unit)}" ${String(state.movementProduct) === String(p.id) ? 'selected' : ''}>${esc(p.name)} (${esc(getClassificationLabel(p))}) · Saldo: ${esc(p.quantity)} ${esc(p.unit)}</option>`
                       )
                       .join('')}
                   </select>
@@ -2989,10 +4131,9 @@
                     <span>Custo unitário</span>
                     <input name="unitCost" type="number" min="0" step="any" required placeholder="0,00">
                   </label>
-                  <label class="form-field">
-                    <span>Data de vencimento</span>
-                    <input name="expiryDate" type="date">
-                  </label>
+                  <div class="form-grid-contents" id="modal-entry-date-fields">
+                    ${entryDynamicDateFieldsHtml(preselectedProduct)}
+                  </div>
                   <input type="hidden" name="reason" value="Recebimento de fornecedor">
                 `
                     : `
@@ -3307,6 +4448,13 @@
       state.modal = target.getAttribute('data-open-modal');
       state.modalError = '';
       state.modalExitReason = '';
+      if (state.modal === 'product') {
+        state.productFormCategory = 'Hortifrutti';
+        state.productFormCatalogType = 'distilled';
+        state.productFormPackageStatus = 'closed';
+        state.productFormHandledAt = '';
+        state.productFormShelfLifeDays = '';
+      }
       render();
       return;
     }
@@ -3444,6 +4592,31 @@
       updateReportDynamicNumbers();
       return;
     }
+    if (el.hasAttribute('data-product-dynamic')) {
+      const form = el.closest('form[data-product-form]');
+      const field = el.getAttribute('data-product-dynamic');
+      if (form && (field === 'shelfLifeAfterOpeningDays' || field === 'handledAt')) {
+        const previewEl = form.querySelector('[data-syrup-limit-preview]');
+        if (previewEl) {
+          const handledVal = form.querySelector('input[name="handledAt"]')?.value || '';
+          const daysVal = form.querySelector('input[name="shelfLifeAfterOpeningDays"]')?.value || '';
+          const daysNum = Number(daysVal);
+          const limit = calculateOpenedExpiryDate(
+            handledVal,
+            Number.isInteger(daysNum) && daysNum > 0 ? daysNum : null
+          );
+          if (limit) {
+            previewEl.className = 'form-info-note full-width';
+            previewEl.innerHTML = `${icon('calendar-clock', 16)}<span><strong>Limite após abertura:</strong> ${esc(formatDate(limit))} (${esc(daysNum)} dias a partir da manipulação).</span>`;
+          } else {
+            previewEl.className = 'form-warning-note full-width';
+            previewEl.innerHTML = `${icon('triangle-alert', 16)}<span><strong>Prazo após abertura não definido:</strong> informe a quantidade de dias após abertura para calcular o limite, sem gerar data fictícia.</span>`;
+          }
+          refreshIcons();
+        }
+      }
+      return;
+    }
     if (el.hasAttribute('data-label-field')) {
       const key = el.getAttribute('data-label-field');
       state[key] = el.value;
@@ -3453,14 +4626,17 @@
         const expInput = document.querySelector('input[name="expiryDate"][data-label-field]');
         if (expInput) expInput.min = el.value || '';
       }
+      if (key === 'labelManufacturedAt') {
+        const expInput = document.querySelector('input[name="expiryDate"][data-label-field]');
+        if (expInput) expInput.min = el.value || '';
+        const handInput = document.querySelector('input[name="handledAt"][data-label-field]');
+        if (handInput) handInput.min = el.value || '';
+      }
       const activeProducts = state.products.filter((p) => p.active !== false);
       const product = activeProducts.find((p) => String(p.id) === String(state.labelProductId));
-      const displayQuantity = state.labelQuantity
-        ? `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 3 }).format(Number(state.labelQuantity))} ${state.labelUnit}`
-        : '—';
       const preview = document.getElementById('label-preview-card');
       if (preview) {
-        preview.innerHTML = labelPreviewInnerHtml(product, displayQuantity);
+        preview.innerHTML = labelPreviewInnerHtml(product);
         refreshIcons();
         fitLabelTitle();
       }
@@ -3483,12 +4659,63 @@
       updateReportDynamicNumbers();
       return;
     }
+    if (el.hasAttribute('data-product-dynamic')) {
+      const form = el.closest('form[data-product-form]');
+      const field = el.getAttribute('data-product-dynamic');
+      if (form && (field === 'category' || field === 'catalogType' || field === 'packageStatus')) {
+        const mode = form.getAttribute('data-product-form') || 'create';
+        const container = form.querySelector('[data-product-dynamic-container]');
+        if (container) {
+          const categoryVal = form.querySelector('select[name="category"]')?.value || 'Hortifrutti';
+          const catalogTypeVal =
+            form.querySelector('select[name="catalogType"]')?.value ||
+            form.querySelector('input[name="catalogType"]')?.value ||
+            'distilled';
+          const pkgVal = form.querySelector('select[name="packageStatus"]')?.value || 'closed';
+          const purchasedAtVal = form.querySelector('input[name="purchasedAt"]')?.value || '';
+          const manufacturedAtVal = form.querySelector('input[name="manufacturedAt"]')?.value || '';
+          const handledAtVal = form.querySelector('input[name="handledAt"]')?.value || '';
+          const expiryDateVal = form.querySelector('input[name="expiryDate"]')?.value || '';
+          const expiryVal = form.querySelector('input[name="expiry"]')?.value || '';
+          const shelfVal = form.querySelector('input[name="shelfLifeAfterOpeningDays"]')?.value || '';
+
+          if (mode === 'create') {
+            state.productFormCategory = categoryVal;
+            state.productFormCatalogType = catalogTypeVal;
+            state.productFormPackageStatus = pkgVal;
+            state.productFormHandledAt = handledAtVal;
+            state.productFormShelfLifeDays = shelfVal;
+          }
+
+          container.innerHTML = productDynamicControlFieldsHtml({
+            mode,
+            category: categoryVal,
+            catalogType: catalogTypeVal,
+            packageStatus: pkgVal,
+            purchasedAt: purchasedAtVal,
+            manufacturedAt: manufacturedAtVal,
+            handledAt: handledAtVal,
+            expiryDate: expiryDateVal,
+            expiry: expiryVal,
+            shelfLifeAfterOpeningDays: shelfVal,
+          });
+          refreshIcons();
+        }
+      }
+      return;
+    }
     if (el.id === 'modal-movement-product') {
       const selectedOpt = el.options[el.selectedIndex];
       const unitVal = selectedOpt ? selectedOpt.getAttribute('data-unit') : '';
       const unitSel = document.getElementById('modal-movement-unit');
       if (unitSel && unitVal && UNITS.includes(unitVal)) {
         unitSel.value = unitVal;
+      }
+      const entryDateWrap = document.getElementById('modal-entry-date-fields');
+      if (entryDateWrap) {
+        const prod = state.products.find((p) => String(p.id) === String(el.value));
+        entryDateWrap.innerHTML = entryDynamicDateFieldsHtml(prod);
+        refreshIcons();
       }
       return;
     }
@@ -3543,12 +4770,18 @@
       state.labelPng = '';
       const activeProducts = state.products.filter((p) => p.active !== false);
       const product = activeProducts.find((p) => String(p.id) === String(state.labelProductId));
-      const displayQuantity = state.labelQuantity
-        ? `${new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 3 }).format(Number(state.labelQuantity))} ${state.labelUnit}`
-        : '—';
+      if (key === 'labelProductId') {
+        syncLabelDefaultsForProduct(product);
+        render();
+        return;
+      }
+      if (key === 'labelPackageStatus') {
+        render();
+        return;
+      }
       const preview = document.getElementById('label-preview-card');
       if (preview) {
-        preview.innerHTML = labelPreviewInnerHtml(product, displayQuantity);
+        preview.innerHTML = labelPreviewInnerHtml(product);
         refreshIcons();
         fitLabelTitle();
       }
@@ -3585,12 +4818,20 @@
       form.reset();
       if (action === 'createLabel') {
         state.labelQuantity = '';
-        state.labelHandledAt = '';
-        state.labelExpiryDate = '';
         state.labelLot = '';
         state.labelResponsibleName = '';
         state.labelQr = '';
         state.labelPng = '';
+        const activeProducts = state.products.filter((p) => p.active !== false);
+        const curProd = activeProducts.find((p) => String(p.id) === String(state.labelProductId));
+        if (curProd) {
+          syncLabelDefaultsForProduct(curProd);
+        } else {
+          state.labelManufacturedAt = '';
+          state.labelHandledAt = '';
+          state.labelExpiryDate = '';
+          state.labelPackageStatus = 'closed';
+        }
       }
     }
 

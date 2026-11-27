@@ -12,6 +12,7 @@ $initialState = [
     'orders'         => [],
     'team'           => [],
     'supportTickets' => [],
+    'stateHistory'   => [],
 ];
 
 try {

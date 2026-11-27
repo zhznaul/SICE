@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/database.php';
+require_once __DIR__ . '/inventory_rules.php';
 
 /**
  * Inicia a sessão PHP com cookies seguros.
@@ -174,14 +175,17 @@ function ensure_support_tickets_table(PDO $pdo): void
 function fetch_app_state(array $user): array
 {
     $pdo = db();
+    ensure_inventory_schema($pdo);
     $canPurchase = ($user['role'] !== 'operational');
     $canManageTeam = ($user['role'] === 'owner');
 
     // 1. Produtos
     $productsStmt = $pdo->query(
         'SELECT id, name, category, catalog_type, code, location, quantity, unit,
-                minimum_stock, expiry, purchased_at, expiry_date, unit_cost, active,
-                status, accent, created_at, updated_at
+                minimum_stock, expiry, purchased_at, manufactured_at, handled_at,
+                expiry_date, expiry_indeterminate, package_status,
+                shelf_life_after_opening_days, opened_expiry_date,
+                unit_cost, active, status, accent, created_at, updated_at
          FROM inventory_products
          ORDER BY name ASC
          LIMIT 500'
@@ -189,25 +193,42 @@ function fetch_app_state(array $user): array
     $products = [];
     $productsById = [];
     foreach ($productsStmt->fetchAll() as $row) {
+        $normCategory = normalize_inventory_category((string) $row['category']);
+        $resolvedCatalogType = resolve_product_classification($normCategory, $row['catalog_type'] !== null ? (string) $row['catalog_type'] : null)
+            ?? ($row['catalog_type'] !== null ? (string) $row['catalog_type'] : null);
+        $isDistilled = ($resolvedCatalogType === 'distilled');
+        $isDisposable = ($resolvedCatalogType === 'disposable');
+        $shelfLifeDays = $row['shelf_life_after_opening_days'] !== null ? (int) $row['shelf_life_after_opening_days'] : null;
+        $openedExpiry = $row['opened_expiry_date'];
+        if ($resolvedCatalogType === 'syrup' && $row['package_status'] === 'opened' && $openedExpiry === null && $row['handled_at'] !== null && $shelfLifeDays !== null) {
+            $openedExpiry = calculate_opened_expiry_date((string) $row['handled_at'], $shelfLifeDays);
+        }
+
         $item = [
-            'id'           => (int) $row['id'],
-            'name'         => (string) $row['name'],
-            'category'     => (string) $row['category'],
-            'catalogType'  => $row['catalog_type'],
-            'code'         => (string) $row['code'],
-            'location'     => (string) $row['location'],
-            'quantity'     => (float) $row['quantity'],
-            'unit'         => (string) $row['unit'],
-            'minimumStock' => (float) $row['minimum_stock'],
-            'expiry'       => $row['expiry'],
-            'purchasedAt'  => $row['purchased_at'],
-            'expiryDate'   => $row['expiry_date'],
-            'unitCost'     => $row['unit_cost'] !== null ? (float) $row['unit_cost'] : 0.0,
-            'active'       => (bool) ((int) $row['active']),
-            'status'       => (string) $row['status'],
-            'accent'       => $row['accent'] ?: '#376759',
-            'createdAt'    => str_replace(' ', 'T', (string) $row['created_at']),
-            'updatedAt'    => str_replace(' ', 'T', (string) $row['updated_at']),
+            'id'                        => (int) $row['id'],
+            'name'                      => (string) $row['name'],
+            'category'                  => $normCategory,
+            'catalogType'               => $resolvedCatalogType,
+            'code'                      => (string) $row['code'],
+            'location'                  => (string) $row['location'],
+            'quantity'                  => (float) $row['quantity'],
+            'unit'                      => (string) $row['unit'],
+            'minimumStock'              => (float) $row['minimum_stock'],
+            'expiry'                    => $isDisposable ? null : $row['expiry'],
+            'purchasedAt'               => $row['purchased_at'],
+            'manufacturedAt'            => $isDisposable ? null : $row['manufactured_at'],
+            'handledAt'                 => $isDisposable ? null : $row['handled_at'],
+            'expiryDate'                => ($isDistilled || $isDisposable) ? null : $row['expiry_date'],
+            'expiryIndeterminate'       => $isDistilled || (bool) ((int) ($row['expiry_indeterminate'] ?? 0)),
+            'packageStatus'             => $resolvedCatalogType === 'syrup' ? ($row['package_status'] ?: 'closed') : null,
+            'shelfLifeAfterOpeningDays' => $resolvedCatalogType === 'syrup' ? $shelfLifeDays : null,
+            'openedExpiryDate'          => $resolvedCatalogType === 'syrup' ? $openedExpiry : null,
+            'unitCost'                  => $row['unit_cost'] !== null ? (float) $row['unit_cost'] : 0.0,
+            'active'                    => (bool) ((int) $row['active']),
+            'status'                    => (string) $row['status'],
+            'accent'                    => $row['accent'] ?: '#376759',
+            'createdAt'                 => str_replace(' ', 'T', (string) $row['created_at']),
+            'updatedAt'                 => str_replace(' ', 'T', (string) $row['updated_at']),
         ];
         $products[] = $item;
         $productsById[$item['id']] = $item;
@@ -216,8 +237,8 @@ function fetch_app_state(array $user): array
     // 2. Movimentações
     $movStmt = $pdo->query(
         'SELECT m.id, m.product_id, m.type, m.quantity, m.unit, m.reason, m.other_reason,
-                m.supplier, m.received_date, m.unit_cost, m.expiry_date, m.operational_area,
-                m.created_by, m.created_at,
+                m.supplier, m.received_date, m.unit_cost, m.manufactured_at, m.expiry_date,
+                m.operational_area, m.created_by, m.created_at,
                 u.name AS user_name, u.email AS user_email, u.role AS user_role
          FROM inventory_movements m
          LEFT JOIN users u ON u.id = m.created_by
@@ -238,6 +259,7 @@ function fetch_app_state(array $user): array
             'supplier'        => $row['supplier'],
             'receivedDate'    => $row['received_date'],
             'unitCost'        => $row['unit_cost'] !== null ? (float) $row['unit_cost'] : null,
+            'manufacturedAt'  => $row['manufactured_at'],
             'expiryDate'      => $row['expiry_date'],
             'createdAt'       => str_replace(' ', 'T', (string) $row['created_at']),
             'product'         => $productsById[$pid] ?? $pid,
@@ -352,6 +374,44 @@ function fetch_app_state(array $user): array
         $supportTickets = [];
     }
 
+    // 7. Histórico de abertura e alterações de estado (xaropes)
+    $stateHistory = [];
+    try {
+        $histStmt = $pdo->query(
+            'SELECT h.id, h.product_id, h.event_type, h.previous_state, h.new_state,
+                    h.manufactured_at, h.original_expiry_date, h.handled_at,
+                    h.shelf_life_after_opening_days, h.opened_expiry_date, h.notes,
+                    h.created_by, h.created_at,
+                    u.name AS user_name
+             FROM inventory_product_state_history h
+             LEFT JOIN users u ON u.id = h.created_by
+             ORDER BY h.created_at DESC, h.id DESC
+             LIMIT 300'
+        );
+        foreach ($histStmt->fetchAll() as $row) {
+            $stateHistory[] = [
+                'id'                        => (int) $row['id'],
+                'productId'                 => (int) $row['product_id'],
+                'eventType'                 => (string) $row['event_type'],
+                'previousState'             => $row['previous_state'],
+                'newState'                  => $row['new_state'],
+                'manufacturedAt'            => $row['manufactured_at'],
+                'originalExpiryDate'        => $row['original_expiry_date'],
+                'handledAt'                 => $row['handled_at'],
+                'shelfLifeAfterOpeningDays' => $row['shelf_life_after_opening_days'] !== null ? (int) $row['shelf_life_after_opening_days'] : null,
+                'openedExpiryDate'          => $row['opened_expiry_date'],
+                'notes'                     => $row['notes'],
+                'createdBy'                 => [
+                    'id'   => (int) $row['created_by'],
+                    'name' => (string) ($row['user_name'] ?? 'Responsável'),
+                ],
+                'createdAt'                 => str_replace(' ', 'T', (string) $row['created_at']),
+            ];
+        }
+    } catch (Throwable $e) {
+        $stateHistory = [];
+    }
+
     return [
         'user'           => $user,
         'products'       => $products,
@@ -360,5 +420,6 @@ function fetch_app_state(array $user): array
         'orders'         => $orders,
         'team'           => $team,
         'supportTickets' => $supportTickets,
+        'stateHistory'   => $stateHistory,
     ];
 }

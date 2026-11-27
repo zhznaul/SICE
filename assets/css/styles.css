@@ -5948,3 +5948,264 @@ body.body-scroll-locked {
     margin-top: 16px;
   }
 }
+
+
+/* ===========================================================================
+   CLASSIFICAÇÕES POR CATEGORIA, CONTROLE DE XAROPES E CAMPOS DINÂMICOS
+   =========================================================================== */
+.form-grid-contents {
+  display: contents;
+}
+
+.form-info-note,
+.form-warning-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 13px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.form-info-note svg,
+.form-warning-note svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.form-info-note {
+  background: #edf4f0;
+  border: 1px solid #cde0d5;
+  color: #1f4438;
+}
+
+.form-warning-note {
+  background: #fdf4e3;
+  border: 1px solid #ebd19d;
+  color: #7c4d0f;
+}
+
+.readonly-pill {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  background: #eef2ef;
+  border: 1px solid var(--line);
+  color: var(--green-900);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.expiry-pending-text {
+  color: #9a6114 !important;
+}
+
+.label-information .label-expiry--warning,
+.label-information .label-expiry--warning strong {
+  color: #9a6114;
+}
+
+.lot-card--neutral {
+  border-left: 3px solid #376759;
+}
+
+.lot-card--warning {
+  background: #fdf6e8;
+  border-color: #e6c68a;
+  border-left: 3px solid #b67c33;
+}
+
+.lot-card--warning strong {
+  color: #8a5410;
+}
+
+.syrup-control-card {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  padding: 16px;
+  margin-top: 16px;
+}
+
+.syrup-control-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.syrup-control-head span {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.syrup-control-head strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 15px;
+  color: var(--green-900);
+}
+
+.syrup-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+}
+
+.syrup-badge--closed {
+  background: #e9f2ed;
+  color: #215141;
+}
+
+.syrup-badge--opened {
+  background: #fbf0d9;
+  color: #8f5610;
+}
+
+.syrup-opened-summary {
+  background: #f6f7f4;
+  border: 1px solid var(--line);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: #3d4a44;
+}
+
+.syrup-opened-summary p {
+  margin: 2px 0;
+}
+
+.syrup-state-form > .btn {
+  margin-top: 12px;
+  width: 100%;
+  justify-content: center;
+}
+
+.syrup-close-editor {
+  margin-top: 12px;
+}
+
+.syrup-history {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.syrup-history > span {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.syrup-history ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.syrup-history li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: #f8f8f5;
+  border: 1px solid var(--line);
+}
+
+.syrup-history li strong {
+  font-size: 12px;
+  color: var(--green-900);
+}
+
+.syrup-history li small {
+  display: block;
+  font-size: 11px;
+  color: #53605a;
+}
+
+.syrup-history li time {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.classification-report {
+  grid-column: 1 / -1;
+}
+
+/* Modo Noturno */
+[data-theme='dark'] .form-info-note {
+  background: rgba(55, 103, 89, 0.22);
+  border-color: #3b6959;
+  color: #cde6da;
+}
+
+[data-theme='dark'] .form-warning-note {
+  background: rgba(214, 152, 56, 0.2);
+  border-color: rgba(240, 194, 114, 0.45);
+  color: #ffd996;
+}
+
+[data-theme='dark'] .readonly-pill {
+  background: #13231d;
+  border-color: #274036;
+  color: #e3eee8;
+}
+
+[data-theme='dark'] .expiry-pending-text {
+  color: #ffd082 !important;
+}
+
+[data-theme='dark'] .lot-card--warning {
+  background: rgba(214, 152, 56, 0.16);
+  border-color: rgba(240, 194, 114, 0.4);
+}
+
+[data-theme='dark'] .lot-card--warning strong {
+  color: #ffd58a;
+}
+
+[data-theme='dark'] .syrup-control-card {
+  background: #12211c;
+  border-color: #253d34;
+}
+
+[data-theme='dark'] .syrup-control-head strong,
+[data-theme='dark'] .syrup-history li strong {
+  color: #eef4f1;
+}
+
+[data-theme='dark'] .syrup-badge--closed {
+  background: rgba(68, 138, 113, 0.26);
+  color: #a9dec6;
+}
+
+[data-theme='dark'] .syrup-badge--opened {
+  background: rgba(224, 168, 78, 0.26);
+  color: #ffd68c;
+}
+
+[data-theme='dark'] .syrup-opened-summary,
+[data-theme='dark'] .syrup-history li {
+  background: #0e1a16;
+  border-color: #22372f;
+  color: #c5d6ce;
+}
+
+[data-theme='dark'] .syrup-history li small {
+  color: #9bb1a7;
+}

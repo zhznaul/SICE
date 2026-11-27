@@ -58,12 +58,6 @@ function valid_unit(string $unit): string
     return in_array($unit, $allowed, true) ? $unit : 'un';
 }
 
-function valid_catalog_type(string $val): ?string
-{
-    $allowed = ['perishable', 'non-perishable', 'beverage', 'disposable'];
-    return in_array($val, $allowed, true) ? $val : null;
-}
-
 function signed_qty(string $type, float $qty): float
 {
     return ($type === 'entry' ? 1.0 : -1.0) * $qty;
@@ -78,33 +72,6 @@ function convert_to_product_unit(float $qty, string $movUnit, string $prodUnit):
         return $qty * 1000.0;
     }
     return $qty;
-}
-
-function compute_product_status(float $qty, float $minStock, ?string $expiryDate = null): string
-{
-    if ($qty <= 0) {
-        return 'critical';
-    }
-    $expiringVerySoon = false;
-    if ($expiryDate !== null && $expiryDate !== '') {
-        try {
-            $exp = new DateTimeImmutable(substr($expiryDate, 0, 10) . ' 00:00:00', new DateTimeZone('UTC'));
-            $today = new DateTimeImmutable('today', new DateTimeZone('UTC'));
-            $diffDays = (int) $today->diff($exp)->format('%r%a');
-            if ($diffDays <= 3) {
-                $expiringVerySoon = true;
-            }
-        } catch (Throwable $e) {
-            $expiringVerySoon = false;
-        }
-    }
-    if ($qty <= $minStock && $expiringVerySoon) {
-        return 'critical';
-    }
-    if ($qty <= $minStock) {
-        return 'low';
-    }
-    return 'ok';
 }
 
 function compute_product_accent(string $status): string
@@ -133,6 +100,7 @@ if (!$user) {
 
 $action = post_text('action', 64);
 $pdo = db();
+ensure_inventory_schema($pdo);
 
 try {
     switch ($action) {
@@ -249,11 +217,29 @@ try {
             $quantity = post_number('quantity');
             $minimumStock = post_number('minimumStock');
             $unitCost = post_number('unitCost') ?? 0.0;
-            $expiryDate = post_date('expiryDate');
 
             if ($name === '' || $code === '' || $quantity === null || $minimumStock === null || $quantity < 0 || $minimumStock < 0) {
                 respond(['ok' => false, 'error' => 'Preencha os campos obrigatórios do insumo (nome, código, quantidade e estoque mínimo).']);
             }
+
+            $ctrlResult = normalize_product_control_fields(
+                $category !== '' ? $category : 'Hortifrutti',
+                post_text('catalogType', 32),
+                [
+                    'purchasedAt'               => post_text('purchasedAt', 20),
+                    'manufacturedAt'            => post_text('manufacturedAt', 20),
+                    'handledAt'                 => post_text('handledAt', 20),
+                    'expiryDate'                => post_text('expiryDate', 20),
+                    'expiry'                    => post_text('expiry', 160),
+                    'packageStatus'             => post_text('packageStatus', 20),
+                    'shelfLifeAfterOpeningDays' => post_text('shelfLifeAfterOpeningDays', 20),
+                ],
+                true
+            );
+            if (!$ctrlResult['ok']) {
+                respond(['ok' => false, 'error' => $ctrlResult['error']]);
+            }
+            $ctrl = $ctrlResult['data'];
 
             $dupStmt = $pdo->prepare('SELECT id FROM inventory_products WHERE UPPER(code) = UPPER(:code) LIMIT 1');
             $dupStmt->execute([':code' => $code]);
@@ -263,34 +249,63 @@ try {
 
             $qtyRounded = round($quantity, 3);
             $minRounded = round($minimumStock, 3);
-            $status = compute_product_status($qtyRounded, $minRounded, $expiryDate);
+            $status = compute_inventory_product_status($qtyRounded, $minRounded, $ctrl);
             $accent = compute_product_accent($status);
 
+            $pdo->beginTransaction();
             $stmt = $pdo->prepare(
                 'INSERT INTO inventory_products
                  (name, category, catalog_type, code, location, quantity, unit, minimum_stock,
-                  unit_cost, active, expiry, purchased_at, expiry_date, status, accent)
+                  unit_cost, active, expiry, purchased_at, manufactured_at, handled_at,
+                  expiry_date, expiry_indeterminate, package_status,
+                  shelf_life_after_opening_days, opened_expiry_date, status, accent)
                  VALUES
                  (:name, :category, :catalog_type, :code, :location, :quantity, :unit, :minimum_stock,
-                  :unit_cost, 1, :expiry, :purchased_at, :expiry_date, :status, :accent)'
+                  :unit_cost, 1, :expiry, :purchased_at, :manufactured_at, :handled_at,
+                  :expiry_date, :expiry_indeterminate, :package_status,
+                  :shelf_life_after_opening_days, :opened_expiry_date, :status, :accent)'
             );
             $stmt->execute([
-                ':name'          => $name,
-                ':category'      => $category !== '' ? $category : 'Hortifrúti',
-                ':catalog_type'  => valid_catalog_type(post_text('catalogType')),
-                ':code'          => $code,
-                ':location'      => $location !== '' ? $location : 'Estoque geral',
-                ':quantity'      => $qtyRounded,
-                ':unit'          => valid_unit(post_text('unit')),
-                ':minimum_stock' => $minRounded,
-                ':unit_cost'     => round(max(0, $unitCost), 2),
-                ':expiry'        => post_text('expiry') ?: null,
-                ':purchased_at'  => post_date('purchasedAt'),
-                ':expiry_date'   => $expiryDate,
-                ':status'        => $status,
-                ':accent'        => $accent,
+                ':name'                          => $name,
+                ':category'                      => $ctrl['category'],
+                ':catalog_type'                  => $ctrl['catalog_type'],
+                ':code'                          => $code,
+                ':location'                      => $location !== '' ? $location : 'Estoque geral',
+                ':quantity'                      => $qtyRounded,
+                ':unit'                          => valid_unit(post_text('unit')),
+                ':minimum_stock'                 => $minRounded,
+                ':unit_cost'                     => round(max(0, $unitCost), 2),
+                ':expiry'                        => $ctrl['expiry'],
+                ':purchased_at'                  => $ctrl['purchased_at'],
+                ':manufactured_at'               => $ctrl['manufactured_at'],
+                ':handled_at'                    => $ctrl['handled_at'],
+                ':expiry_date'                   => $ctrl['expiry_date'],
+                ':expiry_indeterminate'          => $ctrl['expiry_indeterminate'],
+                ':package_status'                => $ctrl['package_status'],
+                ':shelf_life_after_opening_days' => $ctrl['shelf_life_after_opening_days'],
+                ':opened_expiry_date'            => $ctrl['opened_expiry_date'],
+                ':status'                        => $status,
+                ':accent'                        => $accent,
             ]);
             $newId = (int) $pdo->lastInsertId();
+
+            if ($ctrl['catalog_type'] === 'syrup' && $ctrl['package_status'] === 'opened') {
+                record_product_state_event($pdo, [
+                    'product_id'                    => $newId,
+                    'event_type'                    => 'opened',
+                    'previous_state'                => null,
+                    'new_state'                     => 'opened',
+                    'manufactured_at'               => $ctrl['manufactured_at'],
+                    'original_expiry_date'          => $ctrl['expiry_date'],
+                    'handled_at'                    => $ctrl['handled_at'],
+                    'shelf_life_after_opening_days' => $ctrl['shelf_life_after_opening_days'],
+                    'opened_expiry_date'            => $ctrl['opened_expiry_date'],
+                    'notes'                         => 'Cadastro inicial de xarope já aberto.',
+                    'created_by'                    => $user['id'],
+                ]);
+            }
+
+            $pdo->commit();
             respond_with_state($user, 'Insumo cadastrado com sucesso.', ['productId' => $newId]);
         }
 
@@ -308,18 +323,42 @@ try {
             $location = post_text('location');
             $minimumStock = post_number('minimumStock');
             $unitCost = post_number('unitCost') ?? 0.0;
-            $expiryDate = post_date('expiryDate');
 
             if ($productId <= 0 || $name === '' || $code === '' || $minimumStock === null || $minimumStock < 0) {
                 respond(['ok' => false, 'error' => 'Revise nome, código e estoque mínimo.']);
             }
 
-            $curStmt = $pdo->prepare('SELECT quantity FROM inventory_products WHERE id = :id LIMIT 1');
+            $curStmt = $pdo->prepare(
+                'SELECT id, quantity, catalog_type, purchased_at, manufactured_at, handled_at,
+                        expiry_date, package_status, shelf_life_after_opening_days, opened_expiry_date
+                 FROM inventory_products
+                 WHERE id = :id
+                 LIMIT 1'
+            );
             $curStmt->execute([':id' => $productId]);
             $cur = $curStmt->fetch();
             if (!$cur) {
                 respond(['ok' => false, 'error' => 'Insumo não encontrado.']);
             }
+
+            $ctrlResult = normalize_product_control_fields(
+                $category !== '' ? $category : 'Hortifrutti',
+                post_text('catalogType', 32),
+                [
+                    'purchasedAt'               => post_text('purchasedAt', 20) !== '' ? post_text('purchasedAt', 20) : ($cur['purchased_at'] ?? ''),
+                    'manufacturedAt'            => post_text('manufacturedAt', 20),
+                    'handledAt'                 => post_text('handledAt', 20),
+                    'expiryDate'                => post_text('expiryDate', 20),
+                    'expiry'                    => post_text('expiry', 160),
+                    'packageStatus'             => post_text('packageStatus', 20),
+                    'shelfLifeAfterOpeningDays' => post_text('shelfLifeAfterOpeningDays', 20),
+                ],
+                false
+            );
+            if (!$ctrlResult['ok']) {
+                respond(['ok' => false, 'error' => $ctrlResult['error']]);
+            }
+            $ctrl = $ctrlResult['data'];
 
             $dupStmt = $pdo->prepare('SELECT id FROM inventory_products WHERE UPPER(code) = UPPER(:code) AND id <> :id LIMIT 1');
             $dupStmt->execute([':code' => $code, ':id' => $productId]);
@@ -328,33 +367,231 @@ try {
             }
 
             $minRounded = round($minimumStock, 3);
-            $status = compute_product_status((float) $cur['quantity'], $minRounded, $expiryDate);
+            $status = compute_inventory_product_status((float) $cur['quantity'], $minRounded, $ctrl);
             $accent = compute_product_accent($status);
 
+            $pdo->beginTransaction();
             $stmt = $pdo->prepare(
                 'UPDATE inventory_products
                  SET name = :name, category = :category, catalog_type = :catalog_type,
                      code = :code, location = :location, unit = :unit,
                      minimum_stock = :minimum_stock, unit_cost = :unit_cost,
-                     expiry = :expiry, expiry_date = :expiry_date, status = :status, accent = :accent
+                     expiry = :expiry, purchased_at = :purchased_at,
+                     manufactured_at = :manufactured_at, handled_at = :handled_at,
+                     expiry_date = :expiry_date, expiry_indeterminate = :expiry_indeterminate,
+                     package_status = :package_status,
+                     shelf_life_after_opening_days = :shelf_life_after_opening_days,
+                     opened_expiry_date = :opened_expiry_date,
+                     status = :status, accent = :accent
                  WHERE id = :id'
             );
             $stmt->execute([
-                ':name'          => $name,
-                ':category'      => $category !== '' ? $category : 'Hortifrúti',
-                ':catalog_type'  => valid_catalog_type(post_text('catalogType')),
-                ':code'          => $code,
-                ':location'      => $location !== '' ? $location : 'Estoque geral',
-                ':unit'          => valid_unit(post_text('unit')),
-                ':minimum_stock' => $minRounded,
-                ':unit_cost'     => round(max(0, $unitCost), 2),
-                ':expiry'        => post_text('expiry') ?: null,
-                ':expiry_date'   => $expiryDate,
-                ':status'        => $status,
-                ':accent'        => $accent,
-                ':id'            => $productId,
+                ':name'                          => $name,
+                ':category'                      => $ctrl['category'],
+                ':catalog_type'                  => $ctrl['catalog_type'],
+                ':code'                          => $code,
+                ':location'                      => $location !== '' ? $location : 'Estoque geral',
+                ':unit'                          => valid_unit(post_text('unit')),
+                ':minimum_stock'                 => $minRounded,
+                ':unit_cost'                     => round(max(0, $unitCost), 2),
+                ':expiry'                        => $ctrl['expiry'],
+                ':purchased_at'                  => $ctrl['purchased_at'],
+                ':manufactured_at'               => $ctrl['manufactured_at'],
+                ':handled_at'                    => $ctrl['handled_at'],
+                ':expiry_date'                   => $ctrl['expiry_date'],
+                ':expiry_indeterminate'          => $ctrl['expiry_indeterminate'],
+                ':package_status'                => $ctrl['package_status'],
+                ':shelf_life_after_opening_days' => $ctrl['shelf_life_after_opening_days'],
+                ':opened_expiry_date'            => $ctrl['opened_expiry_date'],
+                ':status'                        => $status,
+                ':accent'                        => $accent,
+                ':id'                            => $productId,
             ]);
+
+            if ($ctrl['catalog_type'] === 'syrup') {
+                $prevStatus = $cur['package_status'] ?: null;
+                $newStatusVal = $ctrl['package_status'];
+                $prevDays = $cur['shelf_life_after_opening_days'] !== null ? (int) $cur['shelf_life_after_opening_days'] : null;
+                $newDays = $ctrl['shelf_life_after_opening_days'];
+                $prevHandled = $cur['handled_at'] ?: null;
+                if ($prevStatus !== $newStatusVal || $prevDays !== $newDays || $prevHandled !== $ctrl['handled_at']) {
+                    $eventType = $newStatusVal !== $prevStatus
+                        ? ($newStatusVal === 'opened' ? 'opened' : 'closed')
+                        : 'shelf_life_updated';
+                    record_product_state_event($pdo, [
+                        'product_id'                    => $productId,
+                        'event_type'                    => $eventType,
+                        'previous_state'                => $prevStatus,
+                        'new_state'                     => $newStatusVal,
+                        'manufactured_at'               => $ctrl['manufactured_at'],
+                        'original_expiry_date'          => $ctrl['expiry_date'],
+                        'handled_at'                    => $ctrl['handled_at'],
+                        'shelf_life_after_opening_days' => $ctrl['shelf_life_after_opening_days'],
+                        'opened_expiry_date'            => $ctrl['opened_expiry_date'],
+                        'notes'                         => 'Atualização pelo cadastro do insumo.',
+                        'created_by'                    => $user['id'],
+                    ]);
+                }
+            }
+
+            $pdo->commit();
             respond_with_state($user, 'Insumo atualizado.');
+        }
+
+        // -------------------------------------------------------------------
+        // 4b. Controle rastreável de abertura e estado de xaropes
+        // -------------------------------------------------------------------
+        case 'updateSyrupState': {
+            $productId = (int) post_text('id', 20);
+            $mode = post_text('mode', 32) ?: 'open';
+            $notes = post_text('notes', 500);
+
+            if ($productId <= 0 || !in_array($mode, ['open', 'close', 'configure_shelf_life'], true)) {
+                respond(['ok' => false, 'error' => 'Operação inválida para controle de xarope.']);
+            }
+
+            $pdo->beginTransaction();
+            $pStmt = $pdo->prepare(
+                'SELECT id, name, category, catalog_type, quantity, minimum_stock, active,
+                        manufactured_at, handled_at, expiry_date, expiry_indeterminate,
+                        package_status, shelf_life_after_opening_days, opened_expiry_date
+                 FROM inventory_products
+                 WHERE id = :id
+                 FOR UPDATE'
+            );
+            $pStmt->execute([':id' => $productId]);
+            $prod = $pStmt->fetch();
+            if (!$prod) {
+                $pdo->rollBack();
+                respond(['ok' => false, 'error' => 'Insumo não encontrado.']);
+            }
+            if ((int) $prod['active'] === 0) {
+                $pdo->rollBack();
+                respond(['ok' => false, 'error' => 'Este insumo está inativo.']);
+            }
+            $effectiveClass = resolve_product_classification((string) $prod['category'], $prod['catalog_type'] !== null ? (string) $prod['catalog_type'] : null);
+            if ($effectiveClass !== 'syrup') {
+                $pdo->rollBack();
+                respond(['ok' => false, 'error' => 'O controle de abertura aplica-se exclusivamente a insumos da classificação Xaropes.']);
+            }
+
+            $prevState = $prod['package_status'] ?: 'closed';
+            $manufacturedAt = normalize_iso_date($prod['manufactured_at'] ?? null);
+            $originalExpiry = normalize_iso_date($prod['expiry_date'] ?? null);
+            $currentShelfDays = $prod['shelf_life_after_opening_days'] !== null ? (int) $prod['shelf_life_after_opening_days'] : null;
+
+            $postedShelfRaw = post_text('shelfLifeAfterOpeningDays', 20);
+            $nextShelfDays = $currentShelfDays;
+            if ($postedShelfRaw !== '') {
+                if (!ctype_digit($postedShelfRaw) || (int) $postedShelfRaw <= 0) {
+                    $pdo->rollBack();
+                    respond(['ok' => false, 'error' => 'O prazo após abertura deve ser um número inteiro de dias maior que zero.']);
+                }
+                $nextShelfDays = (int) $postedShelfRaw;
+            }
+
+            if ($mode === 'open') {
+                $handledAt = post_date('handledAt');
+                if ($handledAt === null) {
+                    $pdo->rollBack();
+                    respond(['ok' => false, 'error' => 'Informe a data de manipulação (data de abertura) do xarope.']);
+                }
+                if ($manufacturedAt !== null && $handledAt < $manufacturedAt) {
+                    $pdo->rollBack();
+                    respond(['ok' => false, 'error' => 'A data de manipulação não pode ser anterior à data de fabricação.']);
+                }
+                $nextState = 'opened';
+                $nextHandledAt = $handledAt;
+                $nextOpenedExpiry = calculate_opened_expiry_date($nextHandledAt, $nextShelfDays);
+                $eventType = 'opened';
+                $msg = $nextOpenedExpiry !== null
+                    ? 'Abertura do xarope registrada e limite de utilização calculado.'
+                    : 'Abertura do xarope registrada. Defina o prazo em dias após abertura para calcular o limite de utilização.';
+            } elseif ($mode === 'configure_shelf_life') {
+                if ($nextShelfDays === null || $nextShelfDays <= 0) {
+                    $pdo->rollBack();
+                    respond(['ok' => false, 'error' => 'Informe a quantidade de dias do prazo após abertura.']);
+                }
+                $nextState = $prevState;
+                $nextHandledAt = normalize_iso_date($prod['handled_at'] ?? null);
+                $nextOpenedExpiry = ($nextState === 'opened')
+                    ? calculate_opened_expiry_date($nextHandledAt, $nextShelfDays)
+                    : null;
+                $eventType = 'shelf_life_updated';
+                $msg = 'Prazo de utilização após abertura atualizado.';
+            } else {
+                // Novo frasco fechado (preservando todo o histórico anterior na tabela de histórico)
+                $postedMfg = post_date('manufacturedAt');
+                $postedExp = post_date('expiryDate');
+                if ($postedMfg !== null) {
+                    $manufacturedAt = $postedMfg;
+                }
+                if ($postedExp !== null) {
+                    $originalExpiry = $postedExp;
+                }
+                if ($manufacturedAt !== null && $originalExpiry !== null && $originalExpiry < $manufacturedAt) {
+                    $pdo->rollBack();
+                    respond(['ok' => false, 'error' => 'A data de validade não pode ser anterior à data de fabricação.']);
+                }
+                $nextState = 'closed';
+                $nextHandledAt = null;
+                $nextOpenedExpiry = null;
+                $eventType = 'closed';
+                $msg = 'Estado atualizado para fechado preservando o histórico anterior.';
+            }
+
+            $nextCtx = [
+                'catalog_type'                  => 'syrup',
+                'expiry_indeterminate'          => 0,
+                'package_status'                => $nextState,
+                'expiry_date'                   => $originalExpiry,
+                'handled_at'                    => $nextHandledAt,
+                'shelf_life_after_opening_days' => $nextShelfDays,
+                'opened_expiry_date'            => $nextOpenedExpiry,
+            ];
+            $newStatus = compute_inventory_product_status((float) $prod['quantity'], (float) $prod['minimum_stock'], $nextCtx);
+            $newAccent = compute_product_accent($newStatus);
+
+            $upd = $pdo->prepare(
+                'UPDATE inventory_products
+                 SET manufactured_at = :manufactured_at,
+                     expiry_date = :expiry_date,
+                     handled_at = :handled_at,
+                     package_status = :package_status,
+                     shelf_life_after_opening_days = :shelf_life_days,
+                     opened_expiry_date = :opened_expiry_date,
+                     status = :status,
+                     accent = :accent
+                 WHERE id = :id'
+            );
+            $upd->execute([
+                ':manufactured_at'    => $manufacturedAt,
+                ':expiry_date'        => $originalExpiry,
+                ':handled_at'         => $nextHandledAt,
+                ':package_status'     => $nextState,
+                ':shelf_life_days'    => $nextShelfDays,
+                ':opened_expiry_date' => $nextOpenedExpiry,
+                ':status'             => $newStatus,
+                ':accent'             => $newAccent,
+                ':id'                 => $productId,
+            ]);
+
+            record_product_state_event($pdo, [
+                'product_id'                    => $productId,
+                'event_type'                    => $eventType,
+                'previous_state'                => $prevState,
+                'new_state'                     => $nextState,
+                'manufactured_at'               => $manufacturedAt,
+                'original_expiry_date'          => $originalExpiry,
+                'handled_at'                    => $nextHandledAt,
+                'shelf_life_after_opening_days' => $nextShelfDays,
+                'opened_expiry_date'            => $nextOpenedExpiry,
+                'notes'                         => $notes !== '' ? $notes : null,
+                'created_by'                    => $user['id'],
+            ]);
+
+            $pdo->commit();
+            respond_with_state($user, $msg);
         }
 
         // -------------------------------------------------------------------
@@ -415,7 +652,9 @@ try {
 
             $pdo->beginTransaction();
             $prodStmt = $pdo->prepare(
-                'SELECT id, name, unit, quantity, minimum_stock, unit_cost, purchased_at, expiry_date, active
+                'SELECT id, name, category, catalog_type, unit, quantity, minimum_stock, unit_cost,
+                        purchased_at, manufactured_at, handled_at, expiry_date, expiry_indeterminate,
+                        package_status, shelf_life_after_opening_days, opened_expiry_date, active
                  FROM inventory_products
                  WHERE id = :id
                  FOR UPDATE'
@@ -445,9 +684,18 @@ try {
                 respond(['ok' => false, 'error' => 'Saldo insuficiente para ' . $product['name'] . '. Disponível: ' . $availFmt . ' ' . $prodUnit . '.']);
             }
 
+            $prodClass = resolve_product_classification((string) $product['category'], $product['catalog_type'] !== null ? (string) $product['catalog_type'] : null);
+            $rules = classification_rules($prodClass);
+
             $entryCost = ($type === 'entry') ? post_number('unitCost') : null;
             $receivedDate = ($type === 'entry') ? post_date('receivedDate') : null;
-            $entryExpiryDate = ($type === 'entry') ? post_date('expiryDate') : null;
+            $entryManufacturedAt = ($type === 'entry' && $rules['usesManufacturedAt']) ? post_date('manufacturedAt') : null;
+            $entryExpiryDate = ($type === 'entry' && $rules['hasExpiry']) ? post_date('expiryDate') : null;
+
+            if ($entryManufacturedAt !== null && $entryExpiryDate !== null && $entryExpiryDate < $entryManufacturedAt) {
+                $pdo->rollBack();
+                respond(['ok' => false, 'error' => 'A data de validade não pode ser anterior à data de fabricação.']);
+            }
 
             $nextUnitCost = ($type === 'entry' && $entryCost !== null && $entryCost >= 0)
                 ? round($entryCost, 2)
@@ -455,36 +703,48 @@ try {
             $nextPurchasedAt = ($type === 'entry' && $receivedDate !== null)
                 ? $receivedDate
                 : ($product['purchased_at'] ?: null);
-            $nextExpiryDate = ($type === 'entry' && $entryExpiryDate !== null)
-                ? $entryExpiryDate
-                : ($product['expiry_date'] ?: null);
+            $nextManufacturedAt = ($type === 'entry' && $entryManufacturedAt !== null)
+                ? $entryManufacturedAt
+                : ($product['manufactured_at'] ?: null);
+            $nextExpiryDate = (!$rules['hasExpiry'])
+                ? null
+                : (($type === 'entry' && $entryExpiryDate !== null)
+                    ? $entryExpiryDate
+                    : ($product['expiry_date'] ?: null));
 
-            $newStatus = compute_product_status($newQty, (float) $product['minimum_stock'], $nextExpiryDate);
+            $statusCtx = array_merge($product, [
+                'catalog_type'    => $prodClass,
+                'manufactured_at' => $nextManufacturedAt,
+                'expiry_date'     => $nextExpiryDate,
+            ]);
+            $newStatus = compute_inventory_product_status($newQty, (float) $product['minimum_stock'], $statusCtx);
             $newAccent = compute_product_accent($newStatus);
 
             $upd = $pdo->prepare(
                 'UPDATE inventory_products
                  SET quantity = :qty, unit_cost = :unit_cost, purchased_at = :purchased_at,
-                     expiry_date = :expiry_date, status = :status, accent = :accent
+                     manufactured_at = :manufactured_at, expiry_date = :expiry_date,
+                     status = :status, accent = :accent
                  WHERE id = :id'
             );
             $upd->execute([
-                ':qty'          => $newQty,
-                ':unit_cost'    => $nextUnitCost,
-                ':purchased_at' => $nextPurchasedAt,
-                ':expiry_date'  => $nextExpiryDate,
-                ':status'       => $newStatus,
-                ':accent'       => $newAccent,
-                ':id'           => $productId,
+                ':qty'             => $newQty,
+                ':unit_cost'       => $nextUnitCost,
+                ':purchased_at'    => $nextPurchasedAt,
+                ':manufactured_at' => $nextManufacturedAt,
+                ':expiry_date'     => $nextExpiryDate,
+                ':status'          => $newStatus,
+                ':accent'          => $newAccent,
+                ':id'              => $productId,
             ]);
 
             $ins = $pdo->prepare(
                 'INSERT INTO inventory_movements
                  (product_id, type, quantity, unit, reason, other_reason, supplier,
-                  received_date, unit_cost, expiry_date, operational_area, created_by)
+                  received_date, unit_cost, manufactured_at, expiry_date, operational_area, created_by)
                  VALUES
                  (:product_id, :type, :quantity, :unit, :reason, :other_reason, :supplier,
-                  :received_date, :unit_cost, :expiry_date, :operational_area, :created_by)'
+                  :received_date, :unit_cost, :manufactured_at, :expiry_date, :operational_area, :created_by)'
             );
             $ins->execute([
                 ':product_id'       => $productId,
@@ -496,6 +756,7 @@ try {
                 ':supplier'         => $type === 'entry' ? (post_text('supplier') ?: null) : null,
                 ':received_date'    => $receivedDate,
                 ':unit_cost'        => ($entryCost !== null && $entryCost >= 0) ? round($entryCost, 2) : null,
+                ':manufactured_at'  => $entryManufacturedAt,
                 ':expiry_date'      => $entryExpiryDate,
                 ':operational_area' => ($user['role'] === 'operational' && $type === 'exit') ? $operationalArea : null,
                 ':created_by'       => $user['id'],
@@ -534,7 +795,9 @@ try {
             }
 
             $pStmt = $pdo->prepare(
-                'SELECT id, name, unit, quantity, minimum_stock, expiry_date
+                'SELECT id, name, category, catalog_type, unit, quantity, minimum_stock,
+                        expiry_date, expiry_indeterminate, package_status,
+                        handled_at, shelf_life_after_opening_days, opened_expiry_date
                  FROM inventory_products
                  WHERE id = :id
                  FOR UPDATE'
@@ -560,9 +823,15 @@ try {
                 respond(['ok' => false, 'error' => 'Saldo insuficiente para ' . $prod['name'] . '.']);
             }
 
-            $newExpiry = post_date('expiryDate');
-            $effectiveExpiry = $newExpiry ?: ($prod['expiry_date'] ?: null);
-            $newStatus = compute_product_status($newQty, (float) $prod['minimum_stock'], $effectiveExpiry);
+            $prodClass = resolve_product_classification((string) $prod['category'], $prod['catalog_type'] !== null ? (string) $prod['catalog_type'] : null);
+            $rules = classification_rules($prodClass);
+            $newManufacturedAt = $rules['usesManufacturedAt'] ? post_date('manufacturedAt') : null;
+            $newExpiry = $rules['hasExpiry'] ? post_date('expiryDate') : null;
+            $effectiveCtx = array_merge($prod, [
+                'catalog_type' => $prodClass,
+                'expiry_date'  => $rules['hasExpiry'] ? ($newExpiry ?: ($prod['expiry_date'] ?: null)) : null,
+            ]);
+            $newStatus = compute_inventory_product_status($newQty, (float) $prod['minimum_stock'], $effectiveCtx);
             $newAccent = compute_product_accent($newStatus);
 
             $pdo->prepare('UPDATE inventory_products SET quantity = :qty, status = :status, accent = :accent WHERE id = :id')
@@ -571,16 +840,18 @@ try {
             $pdo->prepare(
                 'UPDATE inventory_movements
                  SET quantity = :qty, unit = :unit, supplier = :supplier,
-                     received_date = :received_date, unit_cost = :unit_cost, expiry_date = :expiry_date
+                     received_date = :received_date, unit_cost = :unit_cost,
+                     manufactured_at = :manufactured_at, expiry_date = :expiry_date
                  WHERE id = :id'
             )->execute([
-                ':qty'           => $qtyRounded,
-                ':unit'          => $newUnit,
-                ':supplier'      => post_text('supplier') ?: null,
-                ':received_date' => post_date('receivedDate'),
-                ':unit_cost'     => ($unitCost !== null && $unitCost >= 0) ? round($unitCost, 2) : null,
-                ':expiry_date'   => $newExpiry,
-                ':id'            => $movId,
+                ':qty'             => $qtyRounded,
+                ':unit'            => $newUnit,
+                ':supplier'        => post_text('supplier') ?: null,
+                ':received_date'   => post_date('receivedDate'),
+                ':unit_cost'       => ($unitCost !== null && $unitCost >= 0) ? round($unitCost, 2) : null,
+                ':manufactured_at' => $newManufacturedAt,
+                ':expiry_date'     => $newExpiry,
+                ':id'              => $movId,
             ]);
             $pdo->commit();
 
@@ -624,7 +895,9 @@ try {
             }
 
             $pStmt = $pdo->prepare(
-                'SELECT id, name, unit, quantity, minimum_stock, expiry_date
+                'SELECT id, name, category, catalog_type, unit, quantity, minimum_stock,
+                        expiry_date, expiry_indeterminate, package_status,
+                        handled_at, shelf_life_after_opening_days, opened_expiry_date
                  FROM inventory_products
                  WHERE id = :id
                  FOR UPDATE'
@@ -653,7 +926,7 @@ try {
                 respond(['ok' => false, 'error' => 'Saldo insuficiente para ' . $prod['name'] . '. Máximo disponível para esta baixa: ' . $availFmt . ' ' . $prodUnit . '.']);
             }
 
-            $newStatus = compute_product_status($newQty, (float) $prod['minimum_stock'], $prod['expiry_date'] ?: null);
+            $newStatus = compute_inventory_product_status($newQty, (float) $prod['minimum_stock'], $prod);
             $newAccent = compute_product_accent($newStatus);
 
             $pdo->prepare('UPDATE inventory_products SET quantity = :qty, status = :status, accent = :accent WHERE id = :id')
@@ -701,7 +974,9 @@ try {
             }
 
             $pStmt = $pdo->prepare(
-                'SELECT id, unit, quantity, minimum_stock, expiry_date
+                'SELECT id, category, catalog_type, unit, quantity, minimum_stock,
+                        expiry_date, expiry_indeterminate, package_status,
+                        handled_at, shelf_life_after_opening_days, opened_expiry_date
                  FROM inventory_products
                  WHERE id = :id
                  FOR UPDATE'
@@ -715,7 +990,7 @@ try {
                     $pdo->rollBack();
                     respond(['ok' => false, 'error' => 'A exclusão deixaria o estoque com saldo negativo.']);
                 }
-                $newStatus = compute_product_status($newQty, (float) $prod['minimum_stock'], $prod['expiry_date'] ?: null);
+                $newStatus = compute_inventory_product_status($newQty, (float) $prod['minimum_stock'], $prod);
                 $newAccent = compute_product_accent($newStatus);
                 $pdo->prepare('UPDATE inventory_products SET quantity = :qty, status = :status, accent = :accent WHERE id = :id')
                     ->execute([':qty' => $newQty, ':status' => $newStatus, ':accent' => $newAccent, ':id' => (int) $prod['id']]);
@@ -817,47 +1092,142 @@ try {
         }
 
         // -------------------------------------------------------------------
-        // 13. Salvar etiqueta
+        // 13. Salvar etiqueta (respeitando as regras de cada classificação)
         // -------------------------------------------------------------------
         case 'createLabel': {
             $productId = (int) post_text('product', 20);
             $quantity = post_number('quantity');
             $unit = post_text('unit', 10);
+            $manufacturedAt = post_date('manufacturedAt');
             $handledAt = post_date('handledAt');
             $expiryDate = post_date('expiryDate');
             $lot = post_text('lot', 80);
             $responsibleName = post_text('responsibleName', 120);
+            $requestedPkgStatus = strtolower(post_text('packageStatus', 20));
 
-            if ($productId <= 0 || $quantity === null || $quantity <= 0 || !in_array($unit, ['UN', 'KG', 'G', 'L', 'ML'], true) || !$handledAt || !$expiryDate || $lot === '' || $responsibleName === '') {
-                respond(['ok' => false, 'error' => 'Preencha todos os campos da etiqueta.']);
-            }
-            if ($expiryDate < $handledAt) {
-                respond(['ok' => false, 'error' => 'A validade não pode ser anterior à manipulação.']);
+            if ($productId <= 0 || $quantity === null || $quantity <= 0 || !in_array($unit, ['UN', 'KG', 'G', 'L', 'ML'], true) || $responsibleName === '') {
+                respond(['ok' => false, 'error' => 'Preencha insumo, quantidade, unidade e responsável.']);
             }
 
-            $pStmt = $pdo->prepare('SELECT id, name, active FROM inventory_products WHERE id = :id LIMIT 1');
+            $pStmt = $pdo->prepare(
+                'SELECT id, name, category, catalog_type, active, manufactured_at, handled_at,
+                        expiry_date, expiry_indeterminate, package_status,
+                        shelf_life_after_opening_days, opened_expiry_date
+                 FROM inventory_products
+                 WHERE id = :id
+                 LIMIT 1'
+            );
             $pStmt->execute([':id' => $productId]);
             $prod = $pStmt->fetch();
             if (!$prod || (int) $prod['active'] === 0) {
                 respond(['ok' => false, 'error' => 'Selecione um insumo ativo.']);
             }
 
+            $catalogType = resolve_product_classification(
+                (string) $prod['category'],
+                $prod['catalog_type'] !== null ? (string) $prod['catalog_type'] : null
+            ) ?? 'perishable';
+
+            $labelManufacturedAt = null;
+            $labelHandledAt = null;
+            $labelExpiryDate = null;
+            $labelOpenedExpiryDate = null;
+            $labelPackageStatus = null;
+            $labelExpiryIndeterminate = 0;
+            $labelLot = $lot !== '' ? $lot : null;
+
+            switch ($catalogType) {
+                case 'distilled':
+                    $labelExpiryIndeterminate = 1;
+                    break;
+
+                case 'disposable':
+                    // Exclusivamente identificação e controle de estoque (sem datas)
+                    break;
+
+                case 'soft':
+                    if (!$manufacturedAt) {
+                        respond(['ok' => false, 'error' => 'Informe a data de fabricação para etiqueta de produto Soft.']);
+                    }
+                    if ($expiryDate && $expiryDate < $manufacturedAt) {
+                        respond(['ok' => false, 'error' => 'A validade não pode ser anterior à data de fabricação.']);
+                    }
+                    $labelManufacturedAt = $manufacturedAt;
+                    $labelExpiryDate = $expiryDate;
+                    break;
+
+                case 'syrup':
+                    $pkgStatus = in_array($requestedPkgStatus, ['closed', 'opened'], true)
+                        ? $requestedPkgStatus
+                        : ($prod['package_status'] ?: 'closed');
+                    $labelPackageStatus = $pkgStatus;
+                    if (!$manufacturedAt) {
+                        respond(['ok' => false, 'error' => 'Informe a data de fabricação para a etiqueta do xarope.']);
+                    }
+                    $labelManufacturedAt = $manufacturedAt;
+                    if ($pkgStatus === 'closed') {
+                        if (!$expiryDate) {
+                            respond(['ok' => false, 'error' => 'Informe a data de validade do xarope fechado.']);
+                        }
+                        if ($expiryDate < $manufacturedAt) {
+                            respond(['ok' => false, 'error' => 'A validade não pode ser anterior à data de fabricação.']);
+                        }
+                        $labelExpiryDate = $expiryDate;
+                    } else {
+                        if (!$handledAt) {
+                            respond(['ok' => false, 'error' => 'Informe a data de manipulação (abertura) do xarope aberto.']);
+                        }
+                        if ($handledAt < $manufacturedAt) {
+                            respond(['ok' => false, 'error' => 'A data de manipulação não pode ser anterior à data de fabricação.']);
+                        }
+                        $shelfDays = $prod['shelf_life_after_opening_days'] !== null
+                            ? (int) $prod['shelf_life_after_opening_days']
+                            : null;
+                        $labelHandledAt = $handledAt;
+                        $labelExpiryDate = $expiryDate ?: ($prod['expiry_date'] ?: null);
+                        $labelOpenedExpiryDate = calculate_opened_expiry_date($handledAt, $shelfDays);
+                    }
+                    break;
+
+                case 'perishable':
+                default:
+                    if (!$handledAt || !$expiryDate || $lot === '') {
+                        respond(['ok' => false, 'error' => 'Preencha data de manipulação, data de validade e lote para produto perecível.']);
+                    }
+                    if ($expiryDate < $handledAt) {
+                        respond(['ok' => false, 'error' => 'A validade não pode ser anterior à manipulação.']);
+                    }
+                    $labelHandledAt = $handledAt;
+                    $labelExpiryDate = $expiryDate;
+                    $labelLot = $lot;
+                    break;
+            }
+
             $ins = $pdo->prepare(
                 'INSERT INTO inventory_labels
-                 (name, product_id, quantity, unit, handled_at, expiry_date, lot, responsible_name, created_by)
+                 (name, product_id, catalog_type, quantity, unit, manufactured_at, handled_at,
+                  expiry_date, opened_expiry_date, package_status, expiry_indeterminate,
+                  lot, responsible_name, created_by)
                  VALUES
-                 (:name, :product_id, :quantity, :unit, :handled_at, :expiry_date, :lot, :responsible_name, :created_by)'
+                 (:name, :product_id, :catalog_type, :quantity, :unit, :manufactured_at, :handled_at,
+                  :expiry_date, :opened_expiry_date, :package_status, :expiry_indeterminate,
+                  :lot, :responsible_name, :created_by)'
             );
             $ins->execute([
-                ':name'             => (string) $prod['name'],
-                ':product_id'       => $productId,
-                ':quantity'         => round($quantity, 3),
-                ':unit'             => $unit,
-                ':handled_at'       => $handledAt,
-                ':expiry_date'      => $expiryDate,
-                ':lot'              => $lot,
-                ':responsible_name' => $responsibleName,
-                ':created_by'       => $user['id'],
+                ':name'                 => (string) $prod['name'],
+                ':product_id'           => $productId,
+                ':catalog_type'         => $catalogType,
+                ':quantity'             => round($quantity, 3),
+                ':unit'                 => $unit,
+                ':manufactured_at'      => $labelManufacturedAt,
+                ':handled_at'           => $labelHandledAt,
+                ':expiry_date'          => $labelExpiryDate,
+                ':opened_expiry_date'   => $labelOpenedExpiryDate,
+                ':package_status'       => $labelPackageStatus,
+                ':expiry_indeterminate' => $labelExpiryIndeterminate,
+                ':lot'                  => $labelLot,
+                ':responsible_name'     => $responsibleName,
+                ':created_by'           => $user['id'],
             ]);
             respond_with_state($user, 'Etiqueta criada e guardada.');
         }
