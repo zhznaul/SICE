@@ -528,9 +528,9 @@ try {
             $mStmt = $pdo->prepare('SELECT * FROM inventory_movements WHERE id = :id FOR UPDATE');
             $mStmt->execute([':id' => $movId]);
             $orig = $mStmt->fetch();
-            if (!$orig) {
+            if (!$orig || (string) $orig['type'] !== 'entry') {
                 $pdo->rollBack();
-                respond(['ok' => false, 'error' => 'Movimentação não encontrada.']);
+                respond(['ok' => false, 'error' => 'Entrada não encontrada.']);
             }
 
             $pStmt = $pdo->prepare(
@@ -585,6 +585,101 @@ try {
             $pdo->commit();
 
             respond_with_state($user, 'Entrada atualizada e saldo recalculado.');
+        }
+
+        // -------------------------------------------------------------------
+        // 8b. Atualizar baixa (saída) e recalcular saldo
+        // -------------------------------------------------------------------
+        case 'updateExit': {
+            $movId = (int) post_text('id', 20);
+            $quantity = post_number('quantity');
+            $reason = post_text('reason');
+            $otherReason = post_text('otherReason', 500);
+            $operationalArea = post_text('operationalArea', 32);
+
+            if ($movId <= 0 || $quantity === null || $quantity <= 0 || $reason === '') {
+                respond(['ok' => false, 'error' => 'Informe quantidade válida e motivo da baixa.']);
+            }
+            if ($reason === 'Outros' && $otherReason === '') {
+                respond(['ok' => false, 'error' => 'Descreva o motivo da baixa.']);
+            }
+            if ($user['role'] === 'operational' && !in_array($operationalArea, ['kitchen', 'bar'], true)) {
+                respond(['ok' => false, 'error' => 'Selecione cozinha ou bar.']);
+            }
+            if ($operationalArea !== '' && !in_array($operationalArea, ['kitchen', 'bar', 'storekeeper'], true)) {
+                $operationalArea = '';
+            }
+
+            $pdo->beginTransaction();
+            $mStmt = $pdo->prepare('SELECT * FROM inventory_movements WHERE id = :id FOR UPDATE');
+            $mStmt->execute([':id' => $movId]);
+            $orig = $mStmt->fetch();
+            if (!$orig || (string) $orig['type'] !== 'exit') {
+                $pdo->rollBack();
+                respond(['ok' => false, 'error' => 'Registro de baixa não encontrado.']);
+            }
+            if (!is_manager($user) && (int) $orig['created_by'] !== (int) $user['id']) {
+                $pdo->rollBack();
+                respond(['ok' => false, 'error' => 'Você só pode editar baixas registradas por você.'], 403);
+            }
+
+            $pStmt = $pdo->prepare(
+                'SELECT id, name, unit, quantity, minimum_stock, expiry_date
+                 FROM inventory_products
+                 WHERE id = :id
+                 FOR UPDATE'
+            );
+            $pStmt->execute([':id' => (int) $orig['product_id']]);
+            $prod = $pStmt->fetch();
+            if (!$prod) {
+                $pdo->rollBack();
+                respond(['ok' => false, 'error' => 'Insumo não encontrado.']);
+            }
+
+            $prodUnit = (string) $prod['unit'];
+            $newUnitRaw = post_text('unit', 32);
+            $newUnit = $newUnitRaw !== '' ? valid_unit($newUnitRaw) : (string) $orig['unit'];
+            $qtyRounded = round($quantity, 3);
+
+            $oldStockQty = convert_to_product_unit((float) $orig['quantity'], (string) $orig['unit'], $prodUnit);
+            $newStockQty = convert_to_product_unit($qtyRounded, $newUnit, $prodUnit);
+            $delta = signed_qty('exit', $newStockQty) - signed_qty('exit', $oldStockQty);
+            $newQty = round((float) $prod['quantity'] + $delta, 3);
+
+            if ($newQty < 0) {
+                $pdo->rollBack();
+                $maxAvail = round((float) $prod['quantity'] + $oldStockQty, 3);
+                $availFmt = rtrim(rtrim(number_format($maxAvail, 3, ',', '.'), '0'), ',');
+                respond(['ok' => false, 'error' => 'Saldo insuficiente para ' . $prod['name'] . '. Máximo disponível para esta baixa: ' . $availFmt . ' ' . $prodUnit . '.']);
+            }
+
+            $newStatus = compute_product_status($newQty, (float) $prod['minimum_stock'], $prod['expiry_date'] ?: null);
+            $newAccent = compute_product_accent($newStatus);
+
+            $pdo->prepare('UPDATE inventory_products SET quantity = :qty, status = :status, accent = :accent WHERE id = :id')
+                ->execute([
+                    ':qty'    => $newQty,
+                    ':status' => $newStatus,
+                    ':accent' => $newAccent,
+                    ':id'     => (int) $prod['id'],
+                ]);
+
+            $pdo->prepare(
+                'UPDATE inventory_movements
+                 SET quantity = :qty, unit = :unit, reason = :reason,
+                     other_reason = :other_reason, operational_area = :operational_area
+                 WHERE id = :id'
+            )->execute([
+                ':qty'              => $qtyRounded,
+                ':unit'             => $newUnit,
+                ':reason'           => $reason,
+                ':other_reason'     => $reason === 'Outros' ? $otherReason : null,
+                ':operational_area' => $operationalArea !== '' ? $operationalArea : null,
+                ':id'               => $movId,
+            ]);
+            $pdo->commit();
+
+            respond_with_state($user, 'Baixa atualizada e saldo recalculado.');
         }
 
         // -------------------------------------------------------------------

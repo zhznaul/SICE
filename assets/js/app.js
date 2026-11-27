@@ -581,7 +581,7 @@
           ${
             canManageInventory
               ? `<button class="btn btn--light" type="button" data-open-modal="entry">
-                  ${icon('arrow-down-left', 18)} Nova entrada
+                  ${icon('arrow-down-left', 18)} Registrar entrada
                 </button>`
               : ''
           }
@@ -725,16 +725,18 @@
   function movementsHtml(canManage) {
     const actionsHtml = `
       <div class="movement-page-actions">
-        <button class="btn btn--light" type="button" data-open-modal="exit">
-          ${icon('arrow-up-right', 18)} Registrar baixa
-        </button>
         ${
           canManage
-            ? `<button class="btn btn--primary" type="button" data-open-modal="entry">${icon('arrow-down-left', 18)} Nova entrada</button>`
+            ? `<button class="btn btn--light" type="button" data-open-modal="entry">${icon('arrow-down-left', 18)} Registrar entrada</button>`
             : ''
         }
+        <button class="btn btn--primary" type="button" data-open-modal="exit">
+          ${icon('arrow-up-right', 18)} Registrar baixa
+        </button>
       </div>
     `;
+
+    const exitReasons = ['Consumo', 'Validade', 'Avaria', 'Outros'];
 
     const rows = state.movements.length
       ? state.movements
@@ -745,9 +747,13 @@
             const areaText = m.operationalArea
               ? AREA_LABELS[m.operationalArea] || m.operationalArea
               : 'Registro identificado';
-            const editorHtml =
-              canManage && m.type === 'entry'
-                ? `
+            const canEditExit =
+              m.type === 'exit' &&
+              (canManage || String(m.createdBy?.id ?? '') === String(state.user?.id ?? ''));
+            let editorHtml = '';
+
+            if (canManage && m.type === 'entry') {
+              editorHtml = `
               <details class="record-editor">
                 <summary>Editar entrada</summary>
                 <form data-action="updateEntry">
@@ -755,12 +761,12 @@
                   <div class="form-grid">
                     <label class="form-field">
                       <span>Quantidade</span>
-                      <input name="quantity" type="number" min="0.01" step="0.01" value="${esc(m.quantity)}" required>
+                      <input name="quantity" type="number" min="0.001" step="any" value="${esc(m.quantity)}" required>
                     </label>
                     <label class="form-field">
                       <span>Unidade</span>
                       <select name="unit">
-                        ${UNITS.map((u) => `<option ${m.unit === u ? 'selected' : ''}>${u}</option>`).join('')}
+                        ${UNITS.map((u) => `<option value="${u}" ${m.unit === u ? 'selected' : ''}>${u}</option>`).join('')}
                       </select>
                     </label>
                     <label class="form-field">
@@ -773,24 +779,99 @@
                     </label>
                     <label class="form-field">
                       <span>Custo unitário</span>
-                      <input name="unitCost" type="number" min="0" step="0.01" value="${esc(m.unitCost ?? '')}">
+                      <input name="unitCost" type="number" min="0" step="any" value="${esc(m.unitCost ?? '')}">
                     </label>
                     <label class="form-field">
                       <span>Validade</span>
                       <input name="expiryDate" type="date" value="${esc((m.expiryDate || '').slice(0, 10))}">
                     </label>
                   </div>
-                  <button class="btn btn--primary" type="submit">Salvar ${icon('arrow-right', 16)}</button>
+                  <div class="record-actions">
+                    <button class="btn btn--primary" type="submit">Salvar ${icon('arrow-right', 16)}</button>
+                    <button class="danger-action" type="button"
+                      data-confirm-action="deleteMovement"
+                      data-confirm-id="${esc(m.id)}"
+                      data-confirm-question="Remover esta entrada e recalcular o saldo?">
+                      Remover entrada
+                    </button>
+                  </div>
                 </form>
-                <button class="danger-action" type="button"
-                  data-confirm-action="deleteMovement"
-                  data-confirm-id="${esc(m.id)}"
-                  data-confirm-question="Remover esta entrada e recalcular o saldo?">
-                  Remover entrada
-                </button>
               </details>
-            `
-                : '';
+            `;
+            } else if (canEditExit) {
+              const reasonOptions = exitReasons.includes(m.reason)
+                ? exitReasons
+                : [m.reason, ...exitReasons];
+              const isOther = m.reason === 'Outros';
+              const isOperational = state.user.role === 'operational';
+              editorHtml = `
+              <details class="record-editor">
+                <summary>Editar baixa</summary>
+                <form data-action="updateExit">
+                  <input type="hidden" name="id" value="${esc(m.id)}">
+                  <div class="form-grid">
+                    <label class="form-field">
+                      <span>Quantidade</span>
+                      <input name="quantity" type="number" min="0.001" step="any" value="${esc(m.quantity)}" required>
+                    </label>
+                    <label class="form-field">
+                      <span>Unidade</span>
+                      <select name="unit">
+                        ${UNITS.map((u) => `<option value="${u}" ${m.unit === u ? 'selected' : ''}>${u}</option>`).join('')}
+                      </select>
+                    </label>
+                    <label class="form-field">
+                      <span>Motivo da baixa</span>
+                      <select name="reason" data-exit-edit-reason="${esc(m.id)}" required>
+                        ${reasonOptions
+                          .map(
+                            (r) =>
+                              `<option value="${esc(r)}" ${m.reason === r ? 'selected' : ''}>${r === 'Outros' ? 'Outros — especificar' : esc(r)}</option>`
+                          )
+                          .join('')}
+                      </select>
+                    </label>
+                    <label class="form-field">
+                      <span>Área operacional</span>
+                      <select name="operationalArea" ${isOperational ? 'required' : ''}>
+                        ${
+                          !isOperational
+                            ? `<option value="" ${!m.operationalArea ? 'selected' : ''}>Gestão de estoque</option>`
+                            : ''
+                        }
+                        <option value="kitchen" ${m.operationalArea === 'kitchen' ? 'selected' : ''}>Cozinha</option>
+                        <option value="bar" ${m.operationalArea === 'bar' ? 'selected' : ''}>Bar</option>
+                        ${
+                          !isOperational
+                            ? `<option value="storekeeper" ${m.operationalArea === 'storekeeper' ? 'selected' : ''}>Almoxarife</option>`
+                            : ''
+                        }
+                      </select>
+                    </label>
+                    <div class="form-field full-width" data-exit-edit-other="${esc(m.id)}" style="display:${isOther ? 'block' : 'none'}">
+                      <label class="form-field full-width">
+                        <span>Descreva o motivo</span>
+                        <textarea name="otherReason" rows="2" ${isOther ? 'required' : ''} placeholder="Explique o motivo da baixa...">${esc(m.otherReason || '')}</textarea>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="record-actions">
+                    <button class="btn btn--primary" type="submit">Salvar alterações ${icon('arrow-right', 16)}</button>
+                    ${
+                      canManage
+                        ? `<button class="danger-action" type="button"
+                            data-confirm-action="deleteMovement"
+                            data-confirm-id="${esc(m.id)}"
+                            data-confirm-question="Remover esta baixa e devolver a quantidade ao estoque?">
+                            Remover baixa
+                          </button>`
+                        : ''
+                    }
+                  </div>
+                </form>
+              </details>
+            `;
+            }
 
             return `
               <div class="movement-history-row">
@@ -2584,7 +2665,7 @@
           ${
             canManage
               ? `<button class="btn btn--light" type="button" data-drawer-movement="entry">
-                  ${icon('arrow-down-left', 18)} Entrada
+                  ${icon('arrow-down-left', 18)} Registrar entrada
                 </button>`
               : ''
           }
@@ -3321,6 +3402,17 @@
       if (wrap) {
         wrap.innerHTML = supportFilesListHtml();
         refreshIcons();
+      }
+      return;
+    }
+    if (el.hasAttribute('data-exit-edit-reason')) {
+      const movId = el.getAttribute('data-exit-edit-reason');
+      const wrap = document.querySelector(`[data-exit-edit-other="${movId}"]`);
+      if (wrap) {
+        const show = el.value === 'Outros';
+        wrap.style.display = show ? 'block' : 'none';
+        const ta = wrap.querySelector('textarea');
+        if (ta) ta.required = show;
       }
       return;
     }
