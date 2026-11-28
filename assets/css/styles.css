@@ -3543,6 +3543,9 @@ h2 {
   font-weight: 800;
   cursor: pointer;
 }
+.record-editor summary.record-editor-summary--exit {
+  color: var(--red);
+}
 .record-editor form {
   margin-top: 13px;
   padding: 0;
@@ -5410,6 +5413,9 @@ body {
 }
 [data-theme='dark'] .record-editor summary {
   color: #8cc6ad;
+}
+[data-theme='dark'] .record-editor summary.record-editor-summary--exit {
+  color: #f09e94;
 }
 [data-theme='dark'] .danger-action,
 [data-theme='dark'] .support-clear-files {

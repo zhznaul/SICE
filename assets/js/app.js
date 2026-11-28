@@ -51,8 +51,33 @@
 
   const UNITS = ['kg', 'g', 'un', 'l', 'ml', 'caixa', 'fardo'];
   const LABEL_UNITS = ['UN', 'KG', 'G', 'L', 'ML', 'FARDO', 'CAIXA'];
+
+  function normalizeUnitName(unit) {
+    const u = String(unit || '').trim().toLowerCase();
+    return u === 'litros' ? 'l' : u;
+  }
+
+  function getCompatibleUnits(prodUnit) {
+    const u = normalizeUnitName(prodUnit);
+    if (u === 'kg' || u === 'g') return ['kg', 'g'];
+    if (u === 'l' || u === 'ml') return ['l', 'ml'];
+    return UNITS.includes(u) ? [u] : UNITS;
+  }
+
+  function convertToProductUnit(qty, movUnit, prodUnit) {
+    const q = Number(qty) || 0;
+    const m = normalizeUnitName(movUnit);
+    const p = normalizeUnitName(prodUnit);
+    if (!p || m === p) return q;
+    if (m === 'g' && p === 'kg') return q / 1000;
+    if (m === 'kg' && p === 'g') return q * 1000;
+    if (m === 'ml' && p === 'l') return q / 1000;
+    if (m === 'l' && p === 'ml') return q * 1000;
+    return q;
+  }
   const STOCK_LOCATIONS = [
     'Estoque Seco',
+    'Estoque de Bebidas',
     'Adega Bar',
     'Câmara Fria',
     'Freezer 1',
@@ -1193,7 +1218,7 @@
             Ver estoque ${icon('arrow-right', 16)}
           </button>
         </div>
-        ${productRowsHtml(attention.length ? attention : state.products.slice(0, 5))}
+        ${productRowsHtml(attention.length ? attention : activeProducts.slice(0, 5))}
       </section>
     `;
   }
@@ -1321,7 +1346,7 @@
                     <label class="form-field">
                       <span>Unidade</span>
                       <select name="unit">
-                        ${UNITS.map((u) => `<option value="${u}" ${m.unit === u ? 'selected' : ''}>${u}</option>`).join('')}
+                        ${getCompatibleUnits(product?.unit || m.unit).map((u) => `<option value="${u}" ${normalizeUnitName(m.unit) === u ? 'selected' : ''}>${u}</option>`).join('')}
                       </select>
                     </label>
                     <label class="form-field">
@@ -1377,7 +1402,7 @@
               const isOperational = state.user.role === 'operational';
               editorHtml = `
               <details class="record-editor">
-                <summary>Editar baixa</summary>
+                <summary class="record-editor-summary--exit">Editar baixa</summary>
                 <form data-action="updateExit">
                   <input type="hidden" name="id" value="${esc(m.id)}">
                   <div class="form-grid">
@@ -1388,7 +1413,7 @@
                     <label class="form-field">
                       <span>Unidade</span>
                       <select name="unit">
-                        ${UNITS.map((u) => `<option value="${u}" ${m.unit === u ? 'selected' : ''}>${u}</option>`).join('')}
+                        ${getCompatibleUnits(product?.unit || m.unit).map((u) => `<option value="${u}" ${normalizeUnitName(m.unit) === u ? 'selected' : ''}>${u}</option>`).join('')}
                       </select>
                     </label>
                     <label class="form-field">
@@ -1845,20 +1870,30 @@
   }
 
   function computeReportContext() {
+    const activeProducts = state.products.filter((p) => p.active !== false);
     const exits = state.movements.filter((m) => m.type === 'exit');
-    const stockValue = state.products.reduce(
+    const stockValue = activeProducts.reduce(
       (sum, p) => sum + Number(p.quantity) * Number(p.unitCost || 0),
       0
     );
     const now = new Date();
+    const curYear = now.getFullYear();
+    const curMonth = now.getMonth() + 1;
     const isCurrentMonth = (val) => {
-      const d = new Date(val);
-      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+      if (!val) return false;
+      const str = String(val).trim();
+      const isoMatch = str.match(/^(\d{4})-(\d{2})/);
+      if (isoMatch) {
+        return Number(isoMatch[1]) === curYear && Number(isoMatch[2]) === curMonth;
+      }
+      const d = new Date(str);
+      return !Number.isNaN(d.getTime()) && d.getMonth() + 1 === curMonth && d.getFullYear() === curYear;
     };
     const monthlyMovs = state.movements.filter((m) => isCurrentMonth(m.receivedDate || m.createdAt));
     const movVal = (m) => {
       const p = typeof m.product === 'object' && m.product ? m.product : null;
-      return Number(m.quantity) * Number(m.unitCost || p?.unitCost || 0);
+      const qtyInProdUnit = convertToProductUnit(m.quantity, m.unit, p?.unit || m.unit);
+      return qtyInProdUnit * Number(m.unitCost || p?.unitCost || 0);
     };
     const monthlyEntriesValue = monthlyMovs
       .filter((m) => m.type === 'entry')
@@ -1873,7 +1908,8 @@
     const lossMovements = exits.filter((m) => /descarte|avaria|validade|outros/i.test(m.reason || ''));
     const lossCost = lossMovements.reduce((s, m) => {
       const p = typeof m.product === 'object' && m.product ? m.product : null;
-      return s + Number(m.quantity) * Number(p?.unitCost || 0);
+      const qtyInProdUnit = convertToProductUnit(m.quantity, m.unit, p?.unit || m.unit);
+      return s + qtyInProdUnit * Number(p?.unitCost || 0);
     }, 0);
     const averageWaste = lossMovements.length ? lossCost / lossMovements.length : 0;
 
@@ -1949,7 +1985,8 @@
       const bucket = bucketMap[key];
       if (!bucket) return;
       const prod = typeof m.product === 'object' && m.product ? m.product : null;
-      const cost = Number(m.quantity) * Number(m.unitCost || prod?.unitCost || 1);
+      const qtyInProdUnit = convertToProductUnit(m.quantity, m.unit, prod?.unit || m.unit);
+      const cost = qtyInProdUnit * Number(m.unitCost || prod?.unitCost || 1);
       if (prod && inventoryGroup(prod) === 'Bebidas') {
         bucket.beverage += cost;
       } else {
@@ -2208,7 +2245,7 @@
           <div class="classification-report-list">
             ${['perishable', 'non-perishable', 'distilled', 'soft', 'syrup', 'disposable']
               .map((clsKey) => {
-                const items = state.products.filter((p) => getProductClassification(p) === clsKey);
+                const items = state.products.filter((p) => p.active !== false && getProductClassification(p) === clsKey);
                 const val = items.reduce((s, p) => s + Number(p.quantity) * Number(p.unitCost || 0), 0);
                 let note = 'Controle de validade padrão';
                 if (clsKey === 'non-perishable') note = 'Insumos secos · controle de validade padrão';
@@ -3116,7 +3153,7 @@
             <span>Insumo</span>
             <select id="qr-manual-select">
               <option value="">Selecione um insumo</option>
-              ${state.products
+              ${(managementMode ? state.products : state.products.filter((p) => p.active !== false))
                 .map(
                   (p) =>
                     `<option value="${esc(p.id)}" ${String(state.qrManualProduct) === String(p.id) ? 'selected' : ''}>${esc(p.name)} · ${esc(p.code)}</option>`
@@ -4381,7 +4418,7 @@
                 <label class="form-field">
                   <span>Unidade</span>
                   <select name="unit" id="modal-movement-unit">
-                    ${UNITS.map((u) => `<option value="${u}" ${defaultUnit === u ? 'selected' : ''}>${u}</option>`).join('')}
+                    ${(preselectedProduct ? getCompatibleUnits(preselectedProduct.unit) : UNITS).map((u) => `<option value="${u}" ${defaultUnit === u ? 'selected' : ''}>${u}</option>`).join('')}
                   </select>
                 </label>
                 ${
@@ -5044,8 +5081,13 @@
       const selectedOpt = el.options[el.selectedIndex];
       const unitVal = selectedOpt ? selectedOpt.getAttribute('data-unit') : '';
       const unitSel = document.getElementById('modal-movement-unit');
-      if (unitSel && unitVal && UNITS.includes(unitVal)) {
-        unitSel.value = unitVal;
+      if (unitSel && unitVal) {
+        const compat = getCompatibleUnits(unitVal);
+        const normDefault = normalizeUnitName(unitVal);
+        unitSel.innerHTML = compat
+          .map((u) => `<option value="${u}" ${normDefault === u ? 'selected' : ''}>${u}</option>`)
+          .join('');
+        unitSel.value = compat.includes(normDefault) ? normDefault : compat[0];
       }
       const entryDateWrap = document.getElementById('modal-entry-date-fields');
       if (entryDateWrap) {
@@ -5270,6 +5312,8 @@
     generateUniqueProductCode,
     STOCK_LOCATIONS: [...STOCK_LOCATIONS],
     renewSessionIfActive,
+    getCompatibleUnits,
+    convertToProductUnit,
   };
 
   // Inicialização e recuperação de rascunho após eventual expiração de sessão

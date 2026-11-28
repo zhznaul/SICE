@@ -221,8 +221,9 @@ function restore_session_from_db_token(PDO $pdo): ?int
         ensure_user_sessions_table($pdo);
         $tokenHash = hash('sha256', $rawToken);
         $stmt = $pdo->prepare(
-            'SELECT id, user_id, remember, UNIX_TIMESTAMP(last_activity_at) AS last_act_ts,
-                    UNIX_TIMESTAMP(expires_at) AS exp_ts
+            'SELECT id, user_id, remember,
+                    TIMESTAMPDIFF(SECOND, last_activity_at, NOW()) AS idle_seconds,
+                    TIMESTAMPDIFF(SECOND, NOW(), expires_at) AS remaining_seconds
              FROM user_sessions
              WHERE token_hash = :hash
                AND revoked_at IS NULL
@@ -237,8 +238,9 @@ function restore_session_from_db_token(PDO $pdo): ?int
 
         $now = time();
         $isRemember = (int) $sess['remember'] === 1;
-        $lastActTs = (int) ($sess['last_act_ts'] ?? 0);
-        if (!$isRemember && $lastActTs > 0 && ($now - $lastActTs) > SICE_SESSION_IDLE_TTL) {
+        $idleSeconds = (int) ($sess['idle_seconds'] ?? 0);
+        $remainingSeconds = max(60, (int) ($sess['remaining_seconds'] ?? SICE_SESSION_MAX_TTL));
+        if (!$isRemember && $idleSeconds > SICE_SESSION_IDLE_TTL) {
             $pdo->prepare('UPDATE user_sessions SET revoked_at = NOW() WHERE id = :id')
                 ->execute([':id' => (int) $sess['id']]);
             return null;
@@ -248,7 +250,7 @@ function restore_session_from_db_token(PDO $pdo): ?int
         $_SESSION['user_id'] = $userId;
         $_SESSION['last_activity'] = $now;
         $_SESSION['remember'] = $isRemember ? 1 : 0;
-        $_SESSION['expires_at'] = (int) ($sess['exp_ts'] ?? ($now + SICE_SESSION_MAX_TTL));
+        $_SESSION['expires_at'] = $now + $remainingSeconds;
         $_SESSION['auth_token_hash'] = $tokenHash;
 
         $pdo->prepare('UPDATE user_sessions SET last_activity_at = NOW() WHERE id = :id')

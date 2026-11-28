@@ -67,6 +67,24 @@ function signed_qty(string $type, float $qty): float
     return ($type === 'entry' ? 1.0 : -1.0) * $qty;
 }
 
+function compatible_units(string $prodUnit): array
+{
+    $p = valid_unit($prodUnit);
+    if ($p === 'kg' || $p === 'g') {
+        return ['kg', 'g'];
+    }
+    if ($p === 'l' || $p === 'ml') {
+        return ['l', 'ml'];
+    }
+    return [$p];
+}
+
+function are_units_compatible(string $movUnit, string $prodUnit): bool
+{
+    $m = valid_unit($movUnit);
+    return in_array($m, compatible_units($prodUnit), true);
+}
+
 function convert_to_product_unit(float $qty, string $movUnit, string $prodUnit): float
 {
     $m = $movUnit === 'litros' ? 'l' : $movUnit;
@@ -212,6 +230,15 @@ try {
                     ':id'     => $empId,
                 ]);
             }
+            // Revoga imediatamente sessões persistentes caso o usuário seja inativado ou tenha a senha redefinida
+            if ($active === 0 || $password !== '') {
+                try {
+                    $pdo->prepare('UPDATE user_sessions SET revoked_at = NOW() WHERE user_id = :uid AND revoked_at IS NULL')
+                        ->execute([':uid' => $empId]);
+                } catch (Throwable $e) {
+                    // Tabela pode não existir ainda
+                }
+            }
             respond_with_state($user, 'Acesso do funcionário atualizado.');
         }
 
@@ -235,7 +262,7 @@ try {
                 respond(['ok' => false, 'error' => 'Preencha os campos obrigatórios do insumo (nome, quantidade e estoque mínimo).']);
             }
             if (!is_valid_stock_location($location)) {
-                respond(['ok' => false, 'error' => 'Selecione um estoque válido (Estoque Seco, Adega Bar, Câmara Fria ou Freezer 1 a 5).']);
+                respond(['ok' => false, 'error' => 'Selecione um estoque válido (Estoque Seco, Estoque de Bebidas, Adega Bar, Câmara Fria ou Freezer 1 a 5).']);
             }
 
             $ctrlResult = normalize_product_control_fields(
@@ -373,18 +400,17 @@ try {
             }
             $productId = (int) post_text('id', 20);
             $name = post_text('name');
-            $code = strtoupper(post_text('code', 80));
             $category = post_text('category', 120);
             $location = post_text('location');
             $minimumStock = post_number('minimumStock');
             $unitCost = post_number('unitCost') ?? 0.0;
 
-            if ($productId <= 0 || $name === '' || $code === '' || $minimumStock === null || $minimumStock < 0) {
-                respond(['ok' => false, 'error' => 'Revise nome, código e estoque mínimo.']);
+            if ($productId <= 0 || $name === '' || $minimumStock === null || $minimumStock < 0) {
+                respond(['ok' => false, 'error' => 'Revise nome e estoque mínimo.']);
             }
 
             $curStmt = $pdo->prepare(
-                'SELECT id, code, location, quantity, catalog_type, purchased_at, manufactured_at, handled_at,
+                'SELECT id, code, location, unit, quantity, catalog_type, purchased_at, manufactured_at, handled_at,
                         expiry_date, package_status, shelf_life_after_opening_days, opened_expiry_date
                  FROM inventory_products
                  WHERE id = :id
@@ -396,8 +422,21 @@ try {
                 respond(['ok' => false, 'error' => 'Insumo não encontrado.']);
             }
 
+            // Código do produto é imutável após criação
+            $code = (string) $cur['code'];
+
+            $requestedUnit = valid_unit(post_text('unit'));
+            $currentUnit = valid_unit((string) $cur['unit']);
+            if ($requestedUnit !== $currentUnit) {
+                $movCountStmt = $pdo->prepare('SELECT COUNT(*) FROM inventory_movements WHERE product_id = :id');
+                $movCountStmt->execute([':id' => $productId]);
+                if ((int) $movCountStmt->fetchColumn() > 0) {
+                    respond(['ok' => false, 'error' => 'Não é possível alterar a unidade de medida de um insumo que já possui movimentações registradas.']);
+                }
+            }
+
             if (!is_valid_stock_location($location) && $location !== (string) $cur['location']) {
-                respond(['ok' => false, 'error' => 'Selecione um estoque válido (Estoque Seco, Adega Bar, Câmara Fria ou Freezer 1 a 5).']);
+                respond(['ok' => false, 'error' => 'Selecione um estoque válido (Estoque Seco, Estoque de Bebidas, Adega Bar, Câmara Fria ou Freezer 1 a 5).']);
             }
 
             $ctrlResult = normalize_product_control_fields(
@@ -419,12 +458,6 @@ try {
             }
             $ctrl = $ctrlResult['data'];
 
-            $dupStmt = $pdo->prepare('SELECT id FROM inventory_products WHERE UPPER(code) = UPPER(:code) AND id <> :id LIMIT 1');
-            $dupStmt->execute([':code' => $code, ':id' => $productId]);
-            if ($dupStmt->fetch()) {
-                respond(['ok' => false, 'error' => 'Já existe outro insumo com o código ' . $code . '.']);
-            }
-
             $minRounded = round($minimumStock, 3);
             $status = compute_inventory_product_status((float) $cur['quantity'], $minRounded, $ctrl);
             $accent = compute_product_accent($status);
@@ -433,7 +466,7 @@ try {
             $stmt = $pdo->prepare(
                 'UPDATE inventory_products
                  SET name = :name, category = :category, catalog_type = :catalog_type,
-                     code = :code, location = :location, unit = :unit,
+                     location = :location, unit = :unit,
                      minimum_stock = :minimum_stock, unit_cost = :unit_cost,
                      expiry = :expiry, purchased_at = :purchased_at,
                      manufactured_at = :manufactured_at, handled_at = :handled_at,
@@ -448,9 +481,8 @@ try {
                 ':name'                          => $name,
                 ':category'                      => $ctrl['category'],
                 ':catalog_type'                  => $ctrl['catalog_type'],
-                ':code'                          => $code,
-                ':location'                      => $location !== '' ? $location : 'Estoque geral',
-                ':unit'                          => valid_unit(post_text('unit')),
+                ':location'                      => $location,
+                ':unit'                          => $requestedUnit,
                 ':minimum_stock'                 => $minRounded,
                 ':unit_cost'                     => round(max(0, $unitCost), 2),
                 ':expiry'                        => $ctrl['expiry'],
@@ -661,9 +693,19 @@ try {
                 respond(['ok' => false, 'error' => 'Acesso restrito à gestão de estoque.'], 403);
             }
             $productId = (int) post_text('id', 20);
+            if ($productId <= 0) {
+                respond(['ok' => false, 'error' => 'Insumo inválido.']);
+            }
             $active = post_text('active') === 'true' ? 1 : 0;
             $stmt = $pdo->prepare('UPDATE inventory_products SET active = :active WHERE id = :id');
             $stmt->execute([':active' => $active, ':id' => $productId]);
+            if ($stmt->rowCount() === 0) {
+                $exists = $pdo->prepare('SELECT 1 FROM inventory_products WHERE id = :id LIMIT 1');
+                $exists->execute([':id' => $productId]);
+                if (!$exists->fetchColumn()) {
+                    respond(['ok' => false, 'error' => 'Insumo não encontrado.']);
+                }
+            }
             respond_with_state($user, 'Disponibilidade do insumo atualizada.');
         }
 
@@ -675,10 +717,29 @@ try {
                 respond(['ok' => false, 'error' => 'Acesso restrito à gestão de estoque.'], 403);
             }
             $productId = (int) post_text('id', 20);
-            $check = $pdo->prepare('SELECT COUNT(*) FROM inventory_movements WHERE product_id = :id');
-            $check->execute([':id' => $productId]);
-            if ((int) $check->fetchColumn() > 0) {
-                respond(['ok' => false, 'error' => 'Este insumo possui histórico. Inative-o para preservar a rastreabilidade.']);
+            if ($productId <= 0) {
+                respond(['ok' => false, 'error' => 'Insumo inválido.']);
+            }
+            $checkMov = $pdo->prepare('SELECT COUNT(*) FROM inventory_movements WHERE product_id = :id');
+            $checkMov->execute([':id' => $productId]);
+            $hasHistory = (int) $checkMov->fetchColumn() > 0;
+
+            if (!$hasHistory) {
+                $checkLbl = $pdo->prepare('SELECT COUNT(*) FROM inventory_labels WHERE product_id = :id');
+                $checkLbl->execute([':id' => $productId]);
+                $hasHistory = (int) $checkLbl->fetchColumn() > 0;
+            }
+            if (!$hasHistory) {
+                try {
+                    $checkState = $pdo->prepare('SELECT COUNT(*) FROM inventory_product_state_history WHERE product_id = :id');
+                    $checkState->execute([':id' => $productId]);
+                    $hasHistory = (int) $checkState->fetchColumn() > 0;
+                } catch (Throwable $e) {
+                    // Ignora se tabela ainda não existir
+                }
+            }
+            if ($hasHistory) {
+                respond(['ok' => false, 'error' => 'Este insumo possui histórico (movimentações, etiquetas ou abertura). Inative-o para preservar a rastreabilidade.']);
             }
             $del = $pdo->prepare('DELETE FROM inventory_products WHERE id = :id');
             $del->execute([':id' => $productId]);
@@ -729,9 +790,13 @@ try {
                 respond(['ok' => false, 'error' => 'Este insumo está inativo. Reative-o antes de movimentar.']);
             }
 
-            $prodUnit = (string) $product['unit'];
+            $prodUnit = valid_unit((string) $product['unit']);
             $movUnitRaw = post_text('unit', 32);
             $movUnit = $movUnitRaw !== '' ? valid_unit($movUnitRaw) : $prodUnit;
+            if (!are_units_compatible($movUnit, $prodUnit)) {
+                $pdo->rollBack();
+                respond(['ok' => false, 'error' => 'Unidade incompatível com ' . $product['name'] . ' (cadastrado em ' . $prodUnit . '). Use: ' . implode(' ou ', compatible_units($prodUnit)) . '.']);
+            }
             $qtyRounded = round($quantity, 3);
             $qtyInProdUnit = convert_to_product_unit($qtyRounded, $movUnit, $prodUnit);
 
@@ -868,9 +933,13 @@ try {
                 respond(['ok' => false, 'error' => 'Insumo não encontrado.']);
             }
 
-            $prodUnit = (string) $prod['unit'];
+            $prodUnit = valid_unit((string) $prod['unit']);
             $newUnitRaw = post_text('unit', 32);
-            $newUnit = $newUnitRaw !== '' ? valid_unit($newUnitRaw) : (string) $orig['unit'];
+            $newUnit = $newUnitRaw !== '' ? valid_unit($newUnitRaw) : valid_unit((string) $orig['unit']);
+            if (!are_units_compatible($newUnit, $prodUnit)) {
+                $pdo->rollBack();
+                respond(['ok' => false, 'error' => 'Unidade incompatível com ' . $prod['name'] . ' (cadastrado em ' . $prodUnit . '). Use: ' . implode(' ou ', compatible_units($prodUnit)) . '.']);
+            }
             $qtyRounded = round($quantity, 3);
 
             $oldStockQty = convert_to_product_unit((float) $orig['quantity'], (string) $orig['unit'], $prodUnit);
@@ -972,9 +1041,13 @@ try {
                 respond(['ok' => false, 'error' => 'Insumo não encontrado.']);
             }
 
-            $prodUnit = (string) $prod['unit'];
+            $prodUnit = valid_unit((string) $prod['unit']);
             $newUnitRaw = post_text('unit', 32);
-            $newUnit = $newUnitRaw !== '' ? valid_unit($newUnitRaw) : (string) $orig['unit'];
+            $newUnit = $newUnitRaw !== '' ? valid_unit($newUnitRaw) : valid_unit((string) $orig['unit']);
+            if (!are_units_compatible($newUnit, $prodUnit)) {
+                $pdo->rollBack();
+                respond(['ok' => false, 'error' => 'Unidade incompatível com ' . $prod['name'] . ' (cadastrado em ' . $prodUnit . '). Use: ' . implode(' ou ', compatible_units($prodUnit)) . '.']);
+            }
             $qtyRounded = round($quantity, 3);
 
             $oldStockQty = convert_to_product_unit((float) $orig['quantity'], (string) $orig['unit'], $prodUnit);
@@ -1080,6 +1153,17 @@ try {
             }
             $prodRaw = post_text('product', 20);
             $productId = $prodRaw !== '' ? (int) $prodRaw : null;
+            $orderCost = post_number('unitCost');
+            if ($orderCost !== null && $orderCost < 0) {
+                respond(['ok' => false, 'error' => 'O custo unitário previsto não pode ser negativo.']);
+            }
+            if ($productId !== null && $productId > 0) {
+                $chk = $pdo->prepare('SELECT 1 FROM inventory_products WHERE id = :id LIMIT 1');
+                $chk->execute([':id' => $productId]);
+                if (!$chk->fetchColumn()) {
+                    respond(['ok' => false, 'error' => 'Insumo relacionado não encontrado.']);
+                }
+            }
 
             $stmt = $pdo->prepare(
                 "INSERT INTO purchase_orders
@@ -1093,7 +1177,7 @@ try {
                 ':supplier'      => post_text('supplier') ?: null,
                 ':quantity'      => round($quantity, 3),
                 ':unit'          => valid_unit(post_text('unit')),
-                ':unit_cost'     => post_number('unitCost'),
+                ':unit_cost'     => $orderCost !== null ? round($orderCost, 2) : null,
                 ':expected_date' => $expectedDate,
                 ':notes'         => post_text('notes', 500) ?: null,
                 ':created_by'    => $user['id'],
@@ -1119,6 +1203,17 @@ try {
             }
             $prodRaw = post_text('product', 20);
             $productId = $prodRaw !== '' ? (int) $prodRaw : null;
+            $orderCost = post_number('unitCost');
+            if ($orderCost !== null && $orderCost < 0) {
+                respond(['ok' => false, 'error' => 'O custo unitário não pode ser negativo.']);
+            }
+            if ($productId !== null && $productId > 0) {
+                $chk = $pdo->prepare('SELECT 1 FROM inventory_products WHERE id = :id LIMIT 1');
+                $chk->execute([':id' => $productId]);
+                if (!$chk->fetchColumn()) {
+                    respond(['ok' => false, 'error' => 'Insumo relacionado não encontrado.']);
+                }
+            }
 
             $stmt = $pdo->prepare(
                 'UPDATE purchase_orders
@@ -1133,7 +1228,7 @@ try {
                 ':supplier'      => post_text('supplier') ?: null,
                 ':quantity'      => round($quantity, 3),
                 ':unit'          => valid_unit(post_text('unit')),
-                ':unit_cost'     => post_number('unitCost'),
+                ':unit_cost'     => $orderCost !== null ? round($orderCost, 2) : null,
                 ':expected_date' => $expectedDate,
                 ':status'        => $status,
                 ':notes'         => post_text('notes', 500) ?: null,
@@ -1329,8 +1424,12 @@ try {
 
             $title = post_text('title');
             $purchaseDate = post_date('purchaseDate');
+            $amount = post_number('amount');
             if ($title === '' || !$purchaseDate) {
                 respond(['ok' => false, 'error' => 'Preencha o título e a data da compra.']);
+            }
+            if ($amount !== null && $amount < 0) {
+                respond(['ok' => false, 'error' => 'O valor do comprovante não pode ser negativo.']);
             }
 
             $dir = __DIR__ . '/../uploads/receipts';
@@ -1352,7 +1451,7 @@ try {
                 ':title'         => $title,
                 ':supplier'      => post_text('supplier') ?: null,
                 ':purchase_date' => $purchaseDate,
-                ':amount'        => post_number('amount'),
+                ':amount'        => $amount !== null ? round($amount, 2) : null,
                 ':filename'      => $storedName,
                 ':original_name' => mb_substr((string) $file['name'], 0, 255),
                 ':mime_type'     => $mime,
@@ -1421,9 +1520,13 @@ try {
                     $ext = strtolower(pathinfo($origName, PATHINFO_EXTENSION));
                     $mime = (string) $finfo->file($tmpPath);
 
-                    $safeExt = $allowedMimeToExt[$mime] ?? (in_array($ext, $allowedExts, true) ? $ext : null);
+                    // Validação estrita por MIME real (nunca confia apenas na extensão do nome do arquivo)
+                    $safeExt = $allowedMimeToExt[$mime] ?? null;
+                    if ($safeExt === null && $mime === 'application/zip' && in_array($ext, ['docx', 'xlsx'], true)) {
+                        $safeExt = $ext;
+                    }
                     if ($safeExt === null) {
-                        respond(['ok' => false, 'error' => 'Formato de arquivo não permitido: ' . $origName . '. Envie PDF, imagens, TXT, CSV, DOC ou XLS.']);
+                        respond(['ok' => false, 'error' => 'Formato de arquivo não permitido: ' . $origName . '. Envie PDF, imagens, TXT, CSV, DOC ou XLS válidos.']);
                     }
 
                     if (!is_dir($dir)) {
@@ -1481,5 +1584,5 @@ try {
     if ($pdo->inTransaction()) {
         $pdo->rollBack();
     }
-    respond(['ok' => false, 'error' => $e->getMessage() ?: 'Não foi possível concluir a ação.'], 500);
+    respond(['ok' => false, 'error' => 'Não foi possível concluir a ação.'], 500);
 }

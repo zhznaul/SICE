@@ -40,6 +40,7 @@ $mime = (string) $row['mime_type'];
 $orig = preg_replace('/[^a-zA-Z0-9._-]/', '_', (string) $row['original_name']);
 
 header('Content-Type: ' . $mime);
+header('X-Content-Type-Options: nosniff');
 header('Content-Disposition: inline; filename="' . $orig . '"');
 header('Content-Length: ' . (string) filesize($filePath));
 header('Cache-Control: private, no-store');

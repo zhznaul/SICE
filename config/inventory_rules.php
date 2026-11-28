@@ -36,6 +36,7 @@ const SICE_CLASSIFICATION_LABELS = [
 
 const SICE_STOCK_LOCATIONS = [
     'Estoque Seco',
+    'Estoque de Bebidas',
     'Adega Bar',
     'Câmara Fria',
     'Freezer 1',
