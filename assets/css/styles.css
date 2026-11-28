@@ -1746,7 +1746,7 @@ h2 {
   font-size: 7px;
 }
 .inventory-categories {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 .inventory-categories strong {
   font-size: 18px;
@@ -1762,9 +1762,12 @@ h2 {
   background: #c2a35e;
 }
 .category-accent--4 {
-  background: #58758a;
+  background: #8f7254;
 }
 .category-accent--5 {
+  background: #58758a;
+}
+.category-accent--6 {
   background: #8b8073;
 }
 .inventory-toolbar {
@@ -6208,4 +6211,92 @@ body.body-scroll-locked {
 
 [data-theme='dark'] .syrup-history li small {
   color: #9bb1a7;
+}
+
+
+/* ===========================================================================
+   CAMPO DE CÓDIGO BLOQUEADO, RASCUNHO DE CADASTRO E AVISO DE SESSÃO
+   =========================================================================== */
+.form-field input.input-locked {
+  background: #e4e8e5;
+  border-color: #c5cec8;
+  color: #3a4942;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: not-allowed;
+  user-select: all;
+}
+
+.form-field input.input-locked:focus {
+  outline: none;
+  border-color: #b7c2bb;
+  box-shadow: none;
+}
+
+.draft-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  margin-bottom: 12px;
+  background: #edf4f0;
+  border: 1px solid #c9ddd1;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #1f4438;
+}
+
+.draft-banner span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+}
+
+.draft-banner button {
+  border: 0;
+  background: transparent;
+  color: #8f3a30;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.draft-banner button:hover {
+  text-decoration: underline;
+}
+
+.session-expired-note {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: #fdf4e3;
+  border: 1px solid #e7c98f;
+  color: #7c4d0f;
+  font-size: 12px;
+  line-height: 1.45;
+  border-radius: 4px;
+}
+
+[data-theme='dark'] .form-field input.input-locked {
+  background: #0a1410;
+  border-color: #20342c;
+  color: #9cb3a8;
+}
+
+[data-theme='dark'] .draft-banner {
+  background: rgba(55, 103, 89, 0.22);
+  border-color: #365f50;
+  color: #cde6da;
+}
+
+[data-theme='dark'] .draft-banner button {
+  color: #f4a49a;
+}
+
+[data-theme='dark'] .session-expired-note {
+  background: rgba(214, 152, 56, 0.18);
+  border-color: rgba(240, 194, 114, 0.4);
+  color: #ffd996;
 }

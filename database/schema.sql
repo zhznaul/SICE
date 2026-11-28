@@ -28,6 +28,28 @@ CREATE TABLE IF NOT EXISTS `users` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
+-- 1b. Sessões persistentes e renováveis de autenticação
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `user_sessions` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `token_hash` CHAR(64) NOT NULL,
+  `user_id` INT UNSIGNED NOT NULL,
+  `remember` TINYINT(1) NOT NULL DEFAULT 0,
+  `user_agent_hash` CHAR(64) DEFAULT NULL,
+  `last_activity_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `expires_at` DATETIME NOT NULL,
+  `revoked_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_user_sessions_token_hash` (`token_hash`),
+  KEY `idx_user_sessions_user` (`user_id`),
+  KEY `idx_user_sessions_expires` (`expires_at`),
+  CONSTRAINT `fk_user_sessions_user`
+    FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+    ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
 -- 2. Produtos / Insumos do estoque
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `inventory_products` (

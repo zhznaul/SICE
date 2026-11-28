@@ -18,6 +18,7 @@
 
   const CATALOG_TYPE_LABELS = {
     perishable: 'Perecível',
+    'non-perishable': 'Não Perecível',
     distilled: 'Destilados',
     soft: 'Soft',
     syrup: 'Xaropes',
@@ -30,6 +31,7 @@
     'Carnes e pescados': 'perishable',
     'Laticínios e frios': 'perishable',
     Hortifrutti: 'perishable',
+    'Insumos Secos': 'non-perishable',
     'Materiais descartáveis': 'disposable',
   };
 
@@ -42,12 +44,24 @@
     'Hortifrutti',
     'Carnes e pescados',
     'Laticínios e frios',
+    'Insumos Secos',
     'Bebidas',
     'Materiais descartáveis',
   ];
 
   const UNITS = ['kg', 'g', 'un', 'l', 'ml', 'caixa', 'fardo'];
   const LABEL_UNITS = ['UN', 'KG', 'G', 'L', 'ML', 'FARDO', 'CAIXA'];
+  const STOCK_LOCATIONS = [
+    'Estoque Seco',
+    'Adega Bar',
+    'Câmara Fria',
+    'Freezer 1',
+    'Freezer 2',
+    'Freezer 3',
+    'Freezer 4',
+    'Freezer 5',
+  ];
+  const PRODUCT_DRAFT_STORAGE_KEY = 'sice_new_product_draft_v1';
   const INVENTORY_CODE_FORMATS = ['qr_code', 'ean_13', 'ean_8', 'code_128', 'upc_a', 'upc_e'];
 
   const SEASONALITY = {
@@ -98,6 +112,29 @@
     return d.toLocaleDateString('pt-BR');
   }
 
+  function getBrasiliaHour(date = new Date()) {
+    try {
+      const parts = new Intl.DateTimeFormat('pt-BR', {
+        timeZone: 'America/Sao_Paulo',
+        hour: '2-digit',
+        hour12: false,
+      }).formatToParts(date);
+      const hourPart = parts.find((p) => p.type === 'hour');
+      const h = Number(hourPart ? hourPart.value : NaN);
+      if (Number.isFinite(h)) return h === 24 ? 0 : h;
+    } catch {
+      // Fallback para UTC-3 (Brasília)
+    }
+    return (date.getUTCHours() + 24 - 3) % 24;
+  }
+
+  function getBrasiliaGreeting(date = new Date()) {
+    const hour = getBrasiliaHour(date);
+    if (hour >= 1 && hour <= 11) return 'Bom dia';
+    if (hour >= 12 && hour <= 18) return 'Boa tarde';
+    return 'Boa noite';
+  }
+
   function normalizeCategoryName(category) {
     const raw = String(category || '').trim();
     if (!raw) return 'Hortifrutti';
@@ -107,6 +144,7 @@
     }
     if (lower === 'carnes e pescados') return 'Carnes e pescados';
     if (lower === 'laticínios e frios' || lower === 'laticinios e frios') return 'Laticínios e frios';
+    if (lower === 'insumos secos' || lower === 'secos' || lower === 'mercearia') return 'Insumos Secos';
     if (lower === 'bebidas') return 'Bebidas';
     if (lower === 'materiais descartáveis' || lower === 'materiais descartaveis') {
       return 'Materiais descartáveis';
@@ -131,6 +169,9 @@
     }
     if (/proteína|frutos do mar|carne|filé|salmão|camarão|polvo|lula|robalo|peixe/.test(reference)) {
       return 'Carnes e pescados';
+    }
+    if (/seco|arroz|feijão|feijao|farinha|açúcar|acucar|macarrão|macarrao|grão|grao|azeite|óleo|oleo|tempero|mercearia/.test(reference)) {
+      return 'Insumos Secos';
     }
     return 'Hortifrutti';
   }
@@ -220,6 +261,18 @@
           supportsOpenClose: false,
           expiryAlertEligible: false,
           disposableControl: true,
+        };
+      case 'non-perishable':
+        return {
+          code: 'non-perishable',
+          label: 'Não Perecível',
+          hasExpiry: true,
+          expiryIndeterminate: false,
+          usesManufacturedAt: false,
+          usesHandledAt: true,
+          supportsOpenClose: false,
+          expiryAlertEligible: true,
+          disposableControl: false,
         };
       default:
         return {
@@ -426,11 +479,19 @@
     toastTimer: null,
 
     // Estado dinâmico do formulário de cadastro de insumo
+    productFormCode: '',
     productFormCategory: 'Hortifrutti',
     productFormCatalogType: 'distilled',
     productFormPackageStatus: 'closed',
     productFormHandledAt: '',
     productFormShelfLifeDays: '',
+    productFormDraft: null,
+
+    // Controle de atividade e renovação segura de sessão
+    lastUserActivityAt: Date.now(),
+    lastSessionRenewAt: Date.now(),
+    sessionRenewInFlight: false,
+    sessionTimer: null,
 
     // Ajuda e suporte
     supportSuccess: '',
@@ -440,6 +501,7 @@
     // Filtros por tela
     invSearch: '',
     invCategory: 'Todos',
+    invLocation: 'Todos',
     invOrder: 'priority',
     alertFilter: 'expiry',
 
@@ -534,13 +596,134 @@
     }
   }
 
+  function loadProductDraft() {
+    try {
+      const raw = window.sessionStorage.getItem(PRODUCT_DRAFT_STORAGE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveProductDraftObject(draft) {
+    try {
+      if (!draft) {
+        window.sessionStorage.removeItem(PRODUCT_DRAFT_STORAGE_KEY);
+      } else {
+        window.sessionStorage.setItem(PRODUCT_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+      }
+    } catch {
+      // sessionStorage indisponível
+    }
+  }
+
+  function clearProductDraft() {
+    state.productFormDraft = null;
+    saveProductDraftObject(null);
+  }
+
+  function captureActiveProductFormDraft(extra = {}) {
+    const form = document.querySelector('form[data-action="createProduct"]');
+    if (!form) return null;
+    const draft = {
+      name: form.querySelector('input[name="name"]')?.value || '',
+      category: form.querySelector('select[name="category"]')?.value || state.productFormCategory || 'Hortifrutti',
+      catalogType:
+        form.querySelector('select[name="catalogType"]')?.value ||
+        form.querySelector('input[name="catalogType"]')?.value ||
+        state.productFormCatalogType ||
+        'distilled',
+      location: form.querySelector('select[name="location"]')?.value || '',
+      quantity: form.querySelector('input[name="quantity"]')?.value || '',
+      unit: form.querySelector('select[name="unit"]')?.value || UNITS[0],
+      minimumStock: form.querySelector('input[name="minimumStock"]')?.value || '',
+      unitCost: form.querySelector('input[name="unitCost"]')?.value || '',
+      purchasedAt: form.querySelector('input[name="purchasedAt"]')?.value || '',
+      manufacturedAt: form.querySelector('input[name="manufacturedAt"]')?.value || '',
+      handledAt: form.querySelector('input[name="handledAt"]')?.value || '',
+      expiryDate: form.querySelector('input[name="expiryDate"]')?.value || '',
+      expiry: form.querySelector('input[name="expiry"]')?.value || '',
+      packageStatus: form.querySelector('select[name="packageStatus"]')?.value || state.productFormPackageStatus || 'closed',
+      shelfLifeAfterOpeningDays: form.querySelector('input[name="shelfLifeAfterOpeningDays"]')?.value || '',
+      savedAt: Date.now(),
+      ...extra,
+    };
+    const hasContent = Boolean(
+      draft.name.trim() ||
+        draft.location ||
+        draft.quantity ||
+        draft.minimumStock ||
+        draft.unitCost ||
+        draft.expiryDate ||
+        draft.manufacturedAt ||
+        draft.expiry.trim()
+    );
+    if (hasContent || extra.interrupted) {
+      state.productFormDraft = draft;
+      saveProductDraftObject(draft);
+      return draft;
+    }
+    return null;
+  }
+
+  function handleSessionExpiredRedirect() {
+    captureActiveProductFormDraft({ interrupted: true });
+    window.location.href = 'index.php?sessionExpired=1';
+  }
+
+  function recordUserActivity() {
+    state.lastUserActivityAt = Date.now();
+  }
+
+  async function renewSessionIfActive({ force = false } = {}) {
+    if (!state.user || state.sessionRenewInFlight) return;
+    const now = Date.now();
+    const idleMs = now - (state.lastUserActivityAt || 0);
+    const maxActiveWindow = state.modal ? 15 * 60 * 1000 : 6 * 60 * 1000;
+    if (!force && idleMs > maxActiveWindow) {
+      // Usuário realmente inativo: não renova indefinidamente para preservar a segurança
+      return;
+    }
+    state.sessionRenewInFlight = true;
+    try {
+      const fd = new FormData();
+      fd.set('action', 'renew');
+      const res = await fetch('api/auth.php', {
+        method: 'POST',
+        body: fd,
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      if (res.status === 401) {
+        handleSessionExpiredRedirect();
+        return;
+      }
+      if (res.ok) {
+        state.lastSessionRenewAt = Date.now();
+      }
+    } catch {
+      // Falha temporária de rede: preserva estado e tenta na próxima janela
+    } finally {
+      state.sessionRenewInFlight = false;
+    }
+  }
+
+  function startSessionKeepalive() {
+    if (!state.user || state.sessionTimer !== null) return;
+    state.sessionTimer = window.setInterval(() => {
+      renewSessionIfActive({ force: false });
+    }, 4 * 60 * 1000);
+  }
+
   async function reloadState() {
     const res = await fetch('api/state.php', {
       cache: 'no-store',
       credentials: 'same-origin',
     });
     if (res.status === 401) {
-      window.location.href = 'index.php';
+      handleSessionExpiredRedirect();
       return;
     }
     const json = await res.json();
@@ -558,8 +741,8 @@
         credentials: 'same-origin',
       });
       if (res.status === 401) {
-        window.location.href = 'index.php';
-        return { ok: false, error: 'Sua sessão expirou. Entre novamente.' };
+        handleSessionExpiredRedirect();
+        return { ok: false, error: 'Sua sessão expirou. Seus dados preenchidos foram preservados.' };
       }
       const json = await res.json();
       return json;
@@ -577,7 +760,10 @@
       state.movementProduct = '';
       if (closeDrawer) state.selectedProductId = null;
       if (action === 'createProduct') {
+        clearProductDraft();
+        state.productFormCode = '';
         state.invCategory = 'Todos';
+        state.invLocation = 'Todos';
         state.invSearch = '';
         state.query = '';
       }
@@ -851,7 +1037,9 @@
   // Tela de Login
   // ---------------------------------------------------------------------------
   function renderLoginScreen() {
-    const hasError = new URLSearchParams(window.location.search).get('loginError') === '1';
+    const params = new URLSearchParams(window.location.search);
+    const hasError = params.get('loginError') === '1';
+    const sessionExpired = params.get('sessionExpired') === '1';
     const root = document.getElementById('root');
     root.innerHTML = `
       <div class="login-screen">
@@ -898,6 +1086,7 @@
                 </label>
               </div>
               ${hasError ? '<p class="form-error">E-mail ou senha incorretos.</p>' : ''}
+              ${sessionExpired ? '<p class="session-expired-note">Sua sessão expirou por inatividade. Entre novamente — se havia um cadastro de insumo em andamento, seus dados foram preservados.</p>' : ''}
               <button class="btn btn--primary login-submit" type="submit">
                 Entrar no SICE ${icon('arrow-right', 18)}
               </button>
@@ -922,12 +1111,13 @@
       0
     );
     const firstName = (state.user.name || '').split(' ')[0];
+    const greeting = getBrasiliaGreeting();
 
     return `
       <section class="welcome">
         <div>
           <div class="eyebrow"><span></span> OPERAÇÃO DE HOJE</div>
-          <h1>Bom dia, ${esc(firstName)}.</h1>
+          <h1>${esc(greeting)}, ${esc(firstName)}.</h1>
           <p>
             Seu estoque exige atenção em <strong>${attention.length} itens</strong>. Vamos organizar as
             prioridades?
@@ -1015,10 +1205,12 @@
         const group = inventoryGroup(product);
         const classLabel = getClassificationLabel(product);
         const matchCat = state.invCategory === 'Todos' || group === state.invCategory;
+        const matchLoc =
+          state.invLocation === 'Todos' || String(product.location || '').trim() === state.invLocation;
         const matchTerm = `${product.name} ${product.code} ${product.location} ${group} ${classLabel}`
           .toLowerCase()
           .includes(term);
-        return matchCat && matchTerm;
+        return matchCat && matchLoc && matchTerm;
       })
       .sort((a, b) => {
         if (state.invOrder === 'name') return a.name.localeCompare(b.name, 'pt-BR');
@@ -1062,9 +1254,13 @@
             <input id="inv-search-input" value="${esc(state.invSearch)}" placeholder="Pesquisar por nome, código, local ou categoria">
           </label>
           <div class="inventory-controls">
-            <button type="button" class="${state.invCategory === 'Todos' ? 'active' : ''}" data-inv-cat="Todos">
+            <button type="button" class="${state.invCategory === 'Todos' && state.invLocation === 'Todos' ? 'active' : ''}" data-inv-cat="Todos">
               Todos (${state.products.length})
             </button>
+            <select id="inv-location-select" aria-label="Filtrar por estoque">
+              <option value="Todos" ${state.invLocation === 'Todos' ? 'selected' : ''}>Todos os estoques</option>
+              ${STOCK_LOCATIONS.map((loc) => `<option value="${esc(loc)}" ${state.invLocation === loc ? 'selected' : ''}>${esc(loc)}</option>`).join('')}
+            </select>
             <select id="inv-order-select">
               <option value="priority" ${state.invOrder === 'priority' ? 'selected' : ''}>Prioridade</option>
               <option value="name" ${state.invOrder === 'name' ? 'selected' : ''}>Nome A–Z</option>
@@ -2010,12 +2206,13 @@
             </div>
           </div>
           <div class="classification-report-list">
-            ${['perishable', 'distilled', 'soft', 'syrup', 'disposable']
+            ${['perishable', 'non-perishable', 'distilled', 'soft', 'syrup', 'disposable']
               .map((clsKey) => {
                 const items = state.products.filter((p) => getProductClassification(p) === clsKey);
                 const val = items.reduce((s, p) => s + Number(p.quantity) * Number(p.unitCost || 0), 0);
                 let note = 'Controle de validade padrão';
-                if (clsKey === 'distilled') note = 'Validade indeterminada · sem alerta de vencimento';
+                if (clsKey === 'non-perishable') note = 'Insumos secos · controle de validade padrão';
+                else if (clsKey === 'distilled') note = 'Validade indeterminada · sem alerta de vencimento';
                 else if (clsKey === 'soft') note = 'Controle por data de fabricação e validade';
                 else if (clsKey === 'syrup') {
                   const openedCount = items.filter((p) => p.packageStatus === 'opened').length;
@@ -2415,7 +2612,7 @@
       `;
     }
 
-    const lotRequired = cls === 'perishable';
+    const lotRequired = cls === 'perishable' || cls === 'non-perishable';
 
     return `
       ${pageTitleHtml(
@@ -2711,9 +2908,9 @@
       return;
     }
 
-    if (cls === 'perishable') {
+    if (cls === 'perishable' || cls === 'non-perishable') {
       if (!state.labelHandledAt || !state.labelExpiryDate || !state.labelLot.trim()) {
-        showToast('Preencha data de manipulação, validade e lote para produto perecível.');
+        showToast('Preencha data de manipulação, validade e lote.');
         return;
       }
       if (state.labelExpiryDate < state.labelHandledAt) {
@@ -3953,7 +4150,7 @@
                 </label>
                 <label class="form-field">
                   <span>Código</span>
-                  <input name="code" value="${esc(product.code)}" required>
+                  <input name="code" value="${esc(product.code)}" readonly tabindex="-1" class="input-locked" aria-readonly="true" required>
                 </label>
                 <label class="form-field">
                   <span>Categoria</span>
@@ -3962,8 +4159,15 @@
                   </select>
                 </label>
                 <label class="form-field">
-                  <span>Local</span>
-                  <input name="location" value="${esc(product.location)}" required>
+                  <span>Estoque / Localização</span>
+                  <select name="location" required>
+                    ${
+                      product.location && !STOCK_LOCATIONS.includes(product.location)
+                        ? `<option value="${esc(product.location)}" selected>${esc(product.location)} (atual)</option>`
+                        : ''
+                    }
+                    ${STOCK_LOCATIONS.map((loc) => `<option value="${esc(loc)}" ${product.location === loc ? 'selected' : ''}>${esc(loc)}</option>`).join('')}
+                  </select>
                 </label>
                 <label class="form-field">
                   <span>Unidade</span>
@@ -4017,13 +4221,31 @@
     `;
   }
 
-  function suggestNextProductCode() {
-    let maxNum = 0;
-    state.products.forEach((p) => {
-      const m = String(p.code || '').match(/(\d+)$/);
-      if (m) maxNum = Math.max(maxNum, Number(m[1]));
-    });
-    return `INS-${String(maxNum + 1).padStart(4, '0')}`;
+  function generateUniqueProductCode() {
+    const existing = new Set(
+      state.products.map((p) => String(p.code || '').trim().toUpperCase())
+    );
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const randIndex = () => {
+      if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+        const arr = new Uint32Array(1);
+        window.crypto.getRandomValues(arr);
+        return arr[0] % alphabet.length;
+      }
+      return Math.floor(Math.random() * alphabet.length);
+    };
+
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      let suffix = '';
+      for (let i = 0; i < 6; i += 1) {
+        suffix += alphabet[randIndex()];
+      }
+      const candidate = `INS-${suffix}`;
+      if (!existing.has(candidate)) {
+        return candidate;
+      }
+    }
+    return `INS-${Date.now().toString(36).toUpperCase().slice(-6)}`;
   }
 
   function movementModalHtml() {
@@ -4037,7 +4259,12 @@
       (p) => String(p.id) === String(state.movementProduct)
     );
     const defaultUnit = preselectedProduct ? preselectedProduct.unit : UNITS[0];
-    const suggestedCode = suggestNextProductCode();
+    if (isProduct && !state.productFormCode) {
+      state.productFormCode = generateUniqueProductCode();
+    }
+    const draft = isProduct ? state.productFormDraft : null;
+    const draftLocation = draft?.location && STOCK_LOCATIONS.includes(draft.location) ? draft.location : '';
+    const draftUnit = draft?.unit && UNITS.includes(draft.unit) ? draft.unit : UNITS[0];
 
     return `
       <div class="modal-layer" role="dialog" aria-modal="true">
@@ -4062,6 +4289,16 @@
               role="alert"
               style="display:${state.modalError ? 'block' : 'none'}"
             >${esc(state.modalError)}</div>
+            ${
+              isProduct && draft
+                ? `
+              <div class="draft-banner" role="status">
+                <span>${icon('history', 15)} Rascunho recuperado automaticamente.</span>
+                <button type="button" data-clear-product-draft>Limpar rascunho</button>
+              </div>
+            `
+                : ''
+            }
             ${!isProduct ? `<input type="hidden" name="type" value="${esc(kind)}">` : ''}
             ${
               isProduct
@@ -4069,11 +4306,12 @@
               <div class="form-grid">
                 <label class="form-field full-width">
                   <span>Nome do novo insumo</span>
-                  <input name="name" required autofocus placeholder="Digite livremente o nome do insumo">
+                  <input name="name" required autofocus value="${esc(draft?.name || '')}" placeholder="Digite livremente o nome do insumo">
                 </label>
                 <label class="form-field">
-                  <span>Código</span>
-                  <input name="code" required placeholder="${esc(suggestedCode)}">
+                  <span>Código (automático)</span>
+                  <input name="code" value="${esc(state.productFormCode)}" readonly tabindex="-1" class="input-locked" aria-readonly="true" required title="Código exclusivo gerado automaticamente pelo sistema">
+                  <input type="hidden" name="codeAutoGenerated" value="1">
                 </label>
                 <label class="form-field">
                   <span>Categoria</span>
@@ -4082,26 +4320,29 @@
                   </select>
                 </label>
                 <label class="form-field">
-                  <span>Local</span>
-                  <input name="location" required placeholder="Ex.: Câmara Fria 01">
+                  <span>Estoque / Localização</span>
+                  <select name="location" required>
+                    <option value="" disabled ${!draftLocation ? 'selected' : ''}>Selecione o estoque</option>
+                    ${STOCK_LOCATIONS.map((loc) => `<option value="${esc(loc)}" ${draftLocation === loc ? 'selected' : ''}>${esc(loc)}</option>`).join('')}
+                  </select>
                 </label>
                 <label class="form-field">
                   <span>Quantidade inicial</span>
-                  <input name="quantity" type="number" min="0" step="any" required placeholder="0">
+                  <input name="quantity" type="number" min="0" step="any" required value="${esc(draft?.quantity || '')}" placeholder="0">
                 </label>
                 <label class="form-field">
                   <span>Unidade</span>
                   <select name="unit">
-                    ${UNITS.map((u) => `<option value="${u}">${u}</option>`).join('')}
+                    ${UNITS.map((u) => `<option value="${u}" ${draftUnit === u ? 'selected' : ''}>${u}</option>`).join('')}
                   </select>
                 </label>
                 <label class="form-field">
                   <span>Estoque mínimo</span>
-                  <input name="minimumStock" type="number" min="0" step="any" required placeholder="0">
+                  <input name="minimumStock" type="number" min="0" step="any" required value="${esc(draft?.minimumStock || '')}" placeholder="0">
                 </label>
                 <label class="form-field">
                   <span>Custo unitário</span>
-                  <input name="unitCost" type="number" min="0" step="any" placeholder="0,00">
+                  <input name="unitCost" type="number" min="0" step="any" value="${esc(draft?.unitCost || '')}" placeholder="0,00">
                 </label>
                 <div class="form-grid-contents" data-product-dynamic-container>
                   ${productDynamicControlFieldsHtml({
@@ -4109,8 +4350,12 @@
                     category: state.productFormCategory,
                     catalogType: state.productFormCatalogType,
                     packageStatus: state.productFormPackageStatus,
-                    handledAt: state.productFormHandledAt,
-                    shelfLifeAfterOpeningDays: state.productFormShelfLifeDays,
+                    purchasedAt: draft?.purchasedAt || '',
+                    manufacturedAt: draft?.manufacturedAt || '',
+                    handledAt: state.productFormHandledAt || draft?.handledAt || '',
+                    expiryDate: draft?.expiryDate || '',
+                    expiry: draft?.expiry || '',
+                    shelfLifeAfterOpeningDays: state.productFormShelfLifeDays || draft?.shelfLifeAfterOpeningDays || '',
                   })}
                 </div>
               </div>
@@ -4472,16 +4717,34 @@
       state.modalError = '';
       state.modalExitReason = '';
       if (state.modal === 'product') {
-        state.productFormCategory = 'Hortifrutti';
-        state.productFormCatalogType = 'distilled';
-        state.productFormPackageStatus = 'closed';
-        state.productFormHandledAt = '';
-        state.productFormShelfLifeDays = '';
+        const savedDraft = loadProductDraft();
+        state.productFormDraft = savedDraft;
+        state.productFormCode = generateUniqueProductCode();
+        state.productFormCategory = savedDraft?.category || 'Hortifrutti';
+        state.productFormCatalogType = savedDraft?.catalogType || 'distilled';
+        state.productFormPackageStatus = savedDraft?.packageStatus || 'closed';
+        state.productFormHandledAt = savedDraft?.handledAt || '';
+        state.productFormShelfLifeDays = savedDraft?.shelfLifeAfterOpeningDays || '';
+        renewSessionIfActive({ force: true });
       }
       render();
       return;
     }
+    if (target.hasAttribute('data-clear-product-draft')) {
+      clearProductDraft();
+      state.productFormCode = generateUniqueProductCode();
+      state.productFormCategory = 'Hortifrutti';
+      state.productFormCatalogType = 'distilled';
+      state.productFormPackageStatus = 'closed';
+      state.productFormHandledAt = '';
+      state.productFormShelfLifeDays = '';
+      render();
+      return;
+    }
     if (target.hasAttribute('data-close-modal')) {
+      if (state.modal === 'product') {
+        captureActiveProductFormDraft();
+      }
       state.modal = null;
       state.modalError = '';
       state.modalExitReason = '';
@@ -4522,7 +4785,12 @@
     }
     if (target.hasAttribute('data-inv-cat')) {
       const cat = target.getAttribute('data-inv-cat');
-      state.invCategory = cat === 'Todos' ? 'Todos' : state.invCategory === cat ? 'Todos' : cat;
+      if (cat === 'Todos') {
+        state.invCategory = 'Todos';
+        state.invLocation = 'Todos';
+      } else {
+        state.invCategory = state.invCategory === cat ? 'Todos' : cat;
+      }
       render();
       return;
     }
@@ -4643,7 +4911,11 @@
   }
 
   root.addEventListener('input', (event) => {
+    recordUserActivity();
     const el = event.target;
+    if (el.closest('form[data-action="createProduct"]')) {
+      captureActiveProductFormDraft();
+    }
     if (el.id === 'global-search-input') {
       state.query = el.value;
       if (state.active === 'Estoque') {
@@ -4688,7 +4960,17 @@
   });
 
   root.addEventListener('change', (event) => {
+    recordUserActivity();
     const el = event.target;
+    if (el.id === 'inv-location-select') {
+      state.invLocation = el.value;
+      const wrap = document.getElementById('inventory-rows-wrap');
+      if (wrap) {
+        wrap.innerHTML = productRowsHtml(getFilteredInventoryProducts());
+        refreshIcons();
+      }
+      return;
+    }
     if (el.id === 'inv-order-select') {
       state.invOrder = el.value;
       const wrap = document.getElementById('inventory-rows-wrap');
@@ -4748,9 +5030,15 @@
             shelfLifeAfterOpeningDays: shelfVal,
           });
           refreshIcons();
+          if (mode === 'create') {
+            captureActiveProductFormDraft();
+          }
         }
       }
       return;
+    }
+    if (el.closest('form[data-action="createProduct"]')) {
+      captureActiveProductFormDraft();
     }
     if (el.id === 'modal-movement-product') {
       const selectedOpt = el.options[el.selectedIndex];
@@ -4961,6 +5249,48 @@
     });
   }
 
-  // Inicialização
+  // Rastreamento de atividade real para renovação segura de sessão
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('pointerdown', recordUserActivity, { passive: true });
+    document.addEventListener('keydown', recordUserActivity, { passive: true });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && state.user) {
+        const sinceRenew = Date.now() - (state.lastSessionRenewAt || 0);
+        if (sinceRenew >= 3 * 60 * 1000) {
+          renewSessionIfActive({ force: false });
+        }
+      }
+    });
+  }
+
+  // Expõe utilitários somente-leitura para verificação automatizada
+  window.__siceHelpers = {
+    getBrasiliaHour,
+    getBrasiliaGreeting,
+    generateUniqueProductCode,
+    STOCK_LOCATIONS: [...STOCK_LOCATIONS],
+    renewSessionIfActive,
+  };
+
+  // Inicialização e recuperação de rascunho após eventual expiração de sessão
+  if (state.user) {
+    startSessionKeepalive();
+    const interruptedDraft = loadProductDraft();
+    if (interruptedDraft && interruptedDraft.interrupted && state.user.role !== 'operational') {
+      delete interruptedDraft.interrupted;
+      saveProductDraftObject(interruptedDraft);
+      state.productFormDraft = interruptedDraft;
+      state.productFormCode = generateUniqueProductCode();
+      state.productFormCategory = interruptedDraft.category || 'Hortifrutti';
+      state.productFormCatalogType = interruptedDraft.catalogType || 'distilled';
+      state.productFormPackageStatus = interruptedDraft.packageStatus || 'closed';
+      state.productFormHandledAt = interruptedDraft.handledAt || '';
+      state.productFormShelfLifeDays = interruptedDraft.shelfLifeAfterOpeningDays || '';
+      state.active = 'Estoque';
+      state.modal = 'product';
+      state.toast = 'Dados do cadastro de insumo recuperados após reconexão.';
+    }
+  }
+
   render();
 })();

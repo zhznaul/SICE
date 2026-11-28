@@ -10,6 +10,7 @@ const SICE_CATEGORIES = [
     'Hortifrutti',
     'Carnes e pescados',
     'Laticínios e frios',
+    'Insumos Secos',
     'Bebidas',
     'Materiais descartáveis',
 ];
@@ -18,18 +19,63 @@ const SICE_AUTO_CLASSIFICATIONS = [
     'Carnes e pescados'      => 'perishable',
     'Laticínios e frios'     => 'perishable',
     'Hortifrutti'            => 'perishable',
+    'Insumos Secos'          => 'non-perishable',
     'Materiais descartáveis' => 'disposable',
 ];
 
 const SICE_BEVERAGE_CLASSIFICATIONS = ['distilled', 'soft', 'syrup'];
 
 const SICE_CLASSIFICATION_LABELS = [
-    'perishable' => 'Perecível',
-    'distilled'  => 'Destilados',
-    'soft'       => 'Soft',
-    'syrup'      => 'Xaropes',
-    'disposable' => 'Descartáveis',
+    'perishable'     => 'Perecível',
+    'non-perishable' => 'Não Perecível',
+    'distilled'      => 'Destilados',
+    'soft'           => 'Soft',
+    'syrup'          => 'Xaropes',
+    'disposable'     => 'Descartáveis',
 ];
+
+const SICE_STOCK_LOCATIONS = [
+    'Estoque Seco',
+    'Adega Bar',
+    'Câmara Fria',
+    'Freezer 1',
+    'Freezer 2',
+    'Freezer 3',
+    'Freezer 4',
+    'Freezer 5',
+];
+
+/**
+ * Valida se o estoque/localização informado está na lista oficial pré-definida.
+ */
+function is_valid_stock_location(string $location): bool
+{
+    return in_array(trim($location), SICE_STOCK_LOCATIONS, true);
+}
+
+/**
+ * Gera um código aleatório exclusivo no formato INS-XXXXXX verificando unicidade no banco.
+ */
+function generate_unique_product_code(PDO $pdo, int $maxAttempts = 25): string
+{
+    $alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    $maxIdx = strlen($alphabet) - 1;
+    $check = $pdo->prepare('SELECT 1 FROM inventory_products WHERE UPPER(code) = UPPER(:code) LIMIT 1');
+
+    for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
+        $suffix = '';
+        for ($i = 0; $i < 6; $i++) {
+            $suffix .= $alphabet[random_int(0, $maxIdx)];
+        }
+        $candidate = 'INS-' . $suffix;
+        $check->execute([':code' => $candidate]);
+        if (!$check->fetchColumn()) {
+            return $candidate;
+        }
+    }
+
+    return 'INS-' . strtoupper(bin2hex(random_bytes(4)));
+}
 
 /**
  * Normaliza a nomenclatura de categoria garantindo compatibilidade com registros
@@ -52,6 +98,9 @@ function normalize_inventory_category(?string $raw): string
     }
     if (in_array($lower, ['laticínios e frios', 'laticinios e frios', 'laticínios', 'laticinios'], true)) {
         return 'Laticínios e frios';
+    }
+    if (in_array($lower, ['insumos secos', 'secos', 'mercearia'], true)) {
+        return 'Insumos Secos';
     }
     if ($lower === 'bebidas') {
         return 'Bebidas';
@@ -143,6 +192,17 @@ function classification_rules(?string $catalogType): array
             'supportsOpenClose'    => false,
             'expiryAlertEligible'  => false,
             'disposableControl'    => true,
+        ],
+        'non-perishable' => [
+            'code'                 => 'non-perishable',
+            'label'                => 'Não Perecível',
+            'hasExpiry'            => true,
+            'expiryIndeterminate'  => false,
+            'usesManufacturedAt'   => false,
+            'usesHandledAt'        => true,
+            'supportsOpenClose'    => false,
+            'expiryAlertEligible'  => true,
+            'disposableControl'    => false,
         ],
         default => [
             'code'                 => 'perishable',
@@ -357,6 +417,24 @@ function normalize_product_control_fields(
                     'package_status'                => $packageStatus,
                     'shelf_life_after_opening_days' => $shelfLifeDays,
                     'opened_expiry_date'            => $openedExpiryDate,
+                    'expiry'                        => $expiryNotes,
+                ],
+            ];
+
+        case 'non-perishable':
+            return [
+                'ok'   => true,
+                'data' => [
+                    'category'                      => $category,
+                    'catalog_type'                  => 'non-perishable',
+                    'purchased_at'                  => $purchasedAt,
+                    'manufactured_at'               => null,
+                    'handled_at'                    => null,
+                    'expiry_date'                   => $expiryDate,
+                    'expiry_indeterminate'          => 0,
+                    'package_status'                => null,
+                    'shelf_life_after_opening_days' => null,
+                    'opened_expiry_date'            => null,
                     'expiry'                        => $expiryNotes,
                 ],
             ];
@@ -649,6 +727,12 @@ function ensure_inventory_schema(PDO $pdo): void
         );
         $pdo->exec(
             "UPDATE `inventory_products`
+             SET `category` = 'Insumos Secos', `catalog_type` = 'non-perishable', `expiry_indeterminate` = 0
+             WHERE LOWER(TRIM(`category`)) = 'insumos secos'
+               AND (`catalog_type` IS NULL OR `catalog_type` <> 'non-perishable' OR `expiry_indeterminate` <> 0)"
+        );
+        $pdo->exec(
+            "UPDATE `inventory_products`
              SET `catalog_type` = 'disposable',
                  `expiry_indeterminate` = 0,
                  `expiry_date` = NULL,
@@ -707,6 +791,19 @@ function ensure_inventory_schema(PDO $pdo): void
                  END
              WHERE `catalog_type` IN ('distilled', 'disposable')"
         );
+
+        // 6. Garantir índice de localização e tabela de sessões persistentes
+        $idxStmt = $pdo->prepare(
+            "SELECT 1 FROM information_schema.STATISTICS
+             WHERE TABLE_SCHEMA = :db
+               AND TABLE_NAME = 'inventory_products'
+               AND INDEX_NAME = 'idx_inventory_products_location'
+             LIMIT 1"
+        );
+        $idxStmt->execute([':db' => $dbName]);
+        if (!$idxStmt->fetchColumn()) {
+            $pdo->exec('ALTER TABLE `inventory_products` ADD KEY `idx_inventory_products_location` (`location`)');
+        }
     } catch (Throwable $e) {
         // Não bloqueia a aplicação caso o usuário do banco não tenha privilégios de DDL
     }

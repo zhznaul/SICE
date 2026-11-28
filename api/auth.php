@@ -19,6 +19,23 @@ if ($action === 'logout') {
     exit;
 }
 
+if ($action === 'renew') {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, max-age=0');
+    $renewed = renew_current_session();
+    if ($renewed === null) {
+        http_response_code(401);
+        echo json_encode(['ok' => false, 'error' => 'Sua sessão expirou. Entre novamente.'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+    echo json_encode([
+        'ok'         => true,
+        'expiresIn'  => $renewed['expiresIn'],
+        'serverTime' => $renewed['serverTime'],
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 $data = $isJson
     ? (json_decode((string) file_get_contents('php://input'), true) ?: [])
     : $_POST;

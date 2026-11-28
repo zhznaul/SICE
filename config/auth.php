@@ -4,8 +4,73 @@ declare(strict_types=1);
 require_once __DIR__ . '/database.php';
 require_once __DIR__ . '/inventory_rules.php';
 
+const SICE_AUTH_COOKIE = 'sice_auth_token';
+const SICE_SESSION_IDLE_TTL = 7200;         // 2 horas de inatividade sem renovação (login padrão)
+const SICE_SESSION_MAX_TTL = 28800;         // 8 horas de janela máxima (login padrão)
+const SICE_SESSION_REMEMBER_TTL = 2592000;  // 30 dias quando "Manter conectado" está ativo
+
+function is_https_request(): bool
+{
+    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+        return true;
+    }
+    if (($_SERVER['SERVER_PORT'] ?? null) == 443) {
+        return true;
+    }
+    $forwardedProto = strtolower((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''));
+    if ($forwardedProto === 'https') {
+        return true;
+    }
+    $forwardedSsl = strtolower((string) ($_SERVER['HTTP_X_FORWARDED_SSL'] ?? ''));
+    return $forwardedSsl === 'on';
+}
+
+function set_auth_cookie(string $name, string $value, int $expires): void
+{
+    setcookie($name, $value, [
+        'expires'  => $expires,
+        'path'     => '/',
+        'secure'   => is_https_request(),
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
+}
+
+function ensure_user_sessions_table(PDO $pdo): void
+{
+    static $ensured = false;
+    if ($ensured) {
+        return;
+    }
+    $ensured = true;
+    try {
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS `user_sessions` (
+              `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+              `token_hash` CHAR(64) NOT NULL,
+              `user_id` INT UNSIGNED NOT NULL,
+              `remember` TINYINT(1) NOT NULL DEFAULT 0,
+              `user_agent_hash` CHAR(64) DEFAULT NULL,
+              `last_activity_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              `expires_at` DATETIME NOT NULL,
+              `revoked_at` DATETIME DEFAULT NULL,
+              `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (`id`),
+              UNIQUE KEY `uk_user_sessions_token_hash` (`token_hash`),
+              KEY `idx_user_sessions_user` (`user_id`),
+              KEY `idx_user_sessions_expires` (`expires_at`),
+              CONSTRAINT `fk_user_sessions_user`
+                FOREIGN KEY (`user_id`) REFERENCES `users` (`id`)
+                ON DELETE CASCADE ON UPDATE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+    } catch (Throwable $e) {
+        // Caso o usuário do banco não tenha permissão CREATE TABLE, segue com sessão PHP padrão
+    }
+}
+
 /**
- * Inicia a sessão PHP com cookies seguros.
+ * Inicia a sessão PHP com cookies seguros e tempo de vida compatível no servidor.
  */
 function start_app_session(int $lifetime = 0): void
 {
@@ -13,14 +78,15 @@ function start_app_session(int $lifetime = 0): void
         return;
     }
 
-    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
-        || (($_SERVER['SERVER_PORT'] ?? null) == 443);
+    $gcLifetime = max(SICE_SESSION_MAX_TTL, $lifetime);
+    @ini_set('session.gc_maxlifetime', (string) $gcLifetime);
+    @ini_set('session.use_strict_mode', '1');
 
     session_name('sice_session');
     session_set_cookie_params([
         'lifetime' => $lifetime,
         'path'     => '/',
-        'secure'   => $isHttps,
+        'secure'   => is_https_request(),
         'httponly' => true,
         'samesite' => 'Lax',
     ]);
@@ -29,10 +95,12 @@ function start_app_session(int $lifetime = 0): void
 
 /**
  * Realiza login validando e-mail, senha e status ativo do usuário.
+ * Cria sessão PHP + registro persistente revogável em user_sessions.
  */
 function login_user(string $email, string $password, bool $remember = false): array
 {
-    $stmt = db()->prepare(
+    $pdo = db();
+    $stmt = $pdo->prepare(
         'SELECT id, name, email, password_hash, role, function_title, active
          FROM users
          WHERE LOWER(email) = LOWER(:email)
@@ -49,34 +117,77 @@ function login_user(string $email, string $password, bool $remember = false): ar
         throw new RuntimeException('Este acesso está inativo.');
     }
 
-    $lifetime = $remember ? 60 * 60 * 24 * 30 : 60 * 60 * 8;
+    $now = time();
+    $lifetime = $remember ? SICE_SESSION_REMEMBER_TTL : SICE_SESSION_MAX_TTL;
     start_app_session($lifetime);
     session_regenerate_id(true);
 
+    $expiresAtTs = $now + $lifetime;
     $_SESSION['user_id'] = (int) $row['id'];
-    $_SESSION['login_at'] = time();
+    $_SESSION['login_at'] = $now;
+    $_SESSION['last_activity'] = $now;
+    $_SESSION['remember'] = $remember ? 1 : 0;
+    $_SESSION['expires_at'] = $expiresAtTs;
 
-    if ($remember) {
-        $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
-            || (($_SERVER['SERVER_PORT'] ?? null) == 443);
-        setcookie(session_name(), session_id(), [
-            'expires'  => time() + $lifetime,
-            'path'     => '/',
-            'secure'   => $isHttps,
-            'httponly' => true,
-            'samesite' => 'Lax',
+    set_auth_cookie(session_name(), session_id(), $remember ? $expiresAtTs : 0);
+
+    // Persiste token opaco com hash SHA-256 no banco para sobreviver a GC de /tmp ou reinício de worker
+    try {
+        ensure_user_sessions_table($pdo);
+        $rawToken = bin2hex(random_bytes(32));
+        $tokenHash = hash('sha256', $rawToken);
+        $ua = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
+        $uaHash = $ua !== '' ? hash('sha256', $ua) : null;
+
+        $ins = $pdo->prepare(
+            'INSERT INTO user_sessions (token_hash, user_id, remember, user_agent_hash, last_activity_at, expires_at)
+             VALUES (:token_hash, :user_id, :remember, :ua_hash, NOW(), DATE_ADD(NOW(), INTERVAL :ttl SECOND))'
+        );
+        $ins->execute([
+            ':token_hash' => $tokenHash,
+            ':user_id'    => (int) $row['id'],
+            ':remember'   => $remember ? 1 : 0,
+            ':ua_hash'    => $uaHash,
+            ':ttl'        => $lifetime,
         ]);
+
+        $_SESSION['auth_token_hash'] = $tokenHash;
+        set_auth_cookie(SICE_AUTH_COOKIE, $rawToken, $remember ? $expiresAtTs : 0);
+
+        // Limpeza oportunista de sessões já expiradas
+        $pdo->exec('DELETE FROM user_sessions WHERE expires_at < DATE_SUB(NOW(), INTERVAL 1 DAY) LIMIT 100');
+    } catch (Throwable $e) {
+        // Mantém sessão PHP caso a tabela user_sessions ainda não exista
     }
 
     return format_user($row);
 }
 
 /**
- * Encerra a sessão atual.
+ * Encerra a sessão atual e revoga o token persistente no banco.
  */
 function logout_user(): void
 {
     start_app_session();
+
+    $tokenHash = null;
+    $cookieToken = (string) ($_COOKIE[SICE_AUTH_COOKIE] ?? '');
+    if ($cookieToken !== '') {
+        $tokenHash = hash('sha256', $cookieToken);
+    } elseif (!empty($_SESSION['auth_token_hash'])) {
+        $tokenHash = (string) $_SESSION['auth_token_hash'];
+    }
+
+    if ($tokenHash !== null) {
+        try {
+            $pdo = db();
+            $rev = $pdo->prepare('UPDATE user_sessions SET revoked_at = NOW() WHERE token_hash = :hash');
+            $rev->execute([':hash' => $tokenHash]);
+        } catch (Throwable $e) {
+            // Ignora falha de revogação se tabela não existir
+        }
+    }
+
     $_SESSION = [];
 
     if (ini_get('session.use_cookies')) {
@@ -90,39 +201,186 @@ function logout_user(): void
             'samesite' => $params['samesite'] ?: 'Lax',
         ]);
     }
+    set_auth_cookie(SICE_AUTH_COOKIE, '', time() - 42000);
 
     session_destroy();
 }
 
 /**
- * Retorna o usuário autenticado atual ou null.
+ * Tenta recuperar sessão válida a partir do cookie persistente (user_sessions)
+ * caso a sessão PHP em /tmp tenha sido coletada pelo GC ou perdida entre workers.
  */
-function current_user(): ?array
+function restore_session_from_db_token(PDO $pdo): ?int
 {
-    start_app_session();
-    $userId = $_SESSION['user_id'] ?? null;
-    if (!$userId) {
+    $rawToken = (string) ($_COOKIE[SICE_AUTH_COOKIE] ?? '');
+    if ($rawToken === '' || strlen($rawToken) < 32) {
         return null;
     }
 
     try {
-        $stmt = db()->prepare(
+        ensure_user_sessions_table($pdo);
+        $tokenHash = hash('sha256', $rawToken);
+        $stmt = $pdo->prepare(
+            'SELECT id, user_id, remember, UNIX_TIMESTAMP(last_activity_at) AS last_act_ts,
+                    UNIX_TIMESTAMP(expires_at) AS exp_ts
+             FROM user_sessions
+             WHERE token_hash = :hash
+               AND revoked_at IS NULL
+               AND expires_at > NOW()
+             LIMIT 1'
+        );
+        $stmt->execute([':hash' => $tokenHash]);
+        $sess = $stmt->fetch();
+        if (!$sess) {
+            return null;
+        }
+
+        $now = time();
+        $isRemember = (int) $sess['remember'] === 1;
+        $lastActTs = (int) ($sess['last_act_ts'] ?? 0);
+        if (!$isRemember && $lastActTs > 0 && ($now - $lastActTs) > SICE_SESSION_IDLE_TTL) {
+            $pdo->prepare('UPDATE user_sessions SET revoked_at = NOW() WHERE id = :id')
+                ->execute([':id' => (int) $sess['id']]);
+            return null;
+        }
+
+        $userId = (int) $sess['user_id'];
+        $_SESSION['user_id'] = $userId;
+        $_SESSION['last_activity'] = $now;
+        $_SESSION['remember'] = $isRemember ? 1 : 0;
+        $_SESSION['expires_at'] = (int) ($sess['exp_ts'] ?? ($now + SICE_SESSION_MAX_TTL));
+        $_SESSION['auth_token_hash'] = $tokenHash;
+
+        $pdo->prepare('UPDATE user_sessions SET last_activity_at = NOW() WHERE id = :id')
+            ->execute([':id' => (int) $sess['id']]);
+
+        return $userId;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+/**
+ * Retorna o usuário autenticado atual ou null, respeitando janela de inatividade
+ * e expiração absoluta, com recuperação transparente via user_sessions.
+ */
+function current_user(): ?array
+{
+    start_app_session();
+    $pdo = null;
+    try {
+        $pdo = db();
+    } catch (Throwable $e) {
+        return null;
+    }
+
+    $now = time();
+    $userId = isset($_SESSION['user_id']) ? (int) $_SESSION['user_id'] : null;
+
+    if ($userId) {
+        $isRemember = !empty($_SESSION['remember']);
+        $lastAct = (int) ($_SESSION['last_activity'] ?? $now);
+        $expTs = (int) ($_SESSION['expires_at'] ?? ($now + SICE_SESSION_MAX_TTL));
+        $idleExpired = !$isRemember && ($now - $lastAct) > SICE_SESSION_IDLE_TTL;
+        $absExpired = $now > $expTs;
+
+        if ($idleExpired || $absExpired) {
+            $_SESSION = [];
+            $userId = null;
+        }
+    }
+
+    if (!$userId) {
+        $userId = restore_session_from_db_token($pdo);
+        if (!$userId) {
+            return null;
+        }
+    }
+
+    try {
+        $stmt = $pdo->prepare(
             'SELECT id, name, email, role, function_title, active
              FROM users
              WHERE id = :id
              LIMIT 1'
         );
-        $stmt->execute([':id' => (int) $userId]);
+        $stmt->execute([':id' => $userId]);
         $row = $stmt->fetch();
 
         if (!$row || (int) $row['active'] === 0) {
             return null;
         }
 
+        // Atualiza timestamp de atividade (com throttle de 60s no banco)
+        $prevAct = (int) ($_SESSION['last_activity'] ?? 0);
+        $_SESSION['last_activity'] = $now;
+        if (($now - $prevAct) >= 60 && !empty($_SESSION['auth_token_hash'])) {
+            try {
+                $pdo->prepare('UPDATE user_sessions SET last_activity_at = NOW() WHERE token_hash = :hash AND revoked_at IS NULL')
+                    ->execute([':hash' => (string) $_SESSION['auth_token_hash']]);
+            } catch (Throwable $e) {
+                // Ignora erro secundário de atualização de atividade
+            }
+        }
+
         return format_user($row);
     } catch (Throwable $e) {
         return null;
     }
+}
+
+/**
+ * Renova com segurança a sessão ativa (sliding expiration dentro da janela máxima permitida).
+ */
+function renew_current_session(): ?array
+{
+    $user = current_user();
+    if (!$user) {
+        return null;
+    }
+
+    $now = time();
+    $isRemember = !empty($_SESSION['remember']);
+    $loginAt = (int) ($_SESSION['login_at'] ?? $now);
+    $maxWindow = $isRemember ? SICE_SESSION_REMEMBER_TTL : (SICE_SESSION_MAX_TTL * 2); // até 16h ativo contínuo ou 30d remember
+    $targetExp = min($loginAt + $maxWindow, $now + ($isRemember ? SICE_SESSION_REMEMBER_TTL : SICE_SESSION_IDLE_TTL));
+    $targetExp = max($targetExp, $now + 1800);
+
+    $_SESSION['last_activity'] = $now;
+    $_SESSION['expires_at'] = $targetExp;
+
+    if (!empty($_SESSION['auth_token_hash'])) {
+        try {
+            $pdo = db();
+            $ttl = max(60, $targetExp - $now);
+            $upd = $pdo->prepare(
+                'UPDATE user_sessions
+                 SET last_activity_at = NOW(),
+                     expires_at = DATE_ADD(NOW(), INTERVAL :ttl SECOND)
+                 WHERE token_hash = :hash
+                   AND revoked_at IS NULL'
+            );
+            $upd->execute([
+                ':ttl'  => $ttl,
+                ':hash' => (string) $_SESSION['auth_token_hash'],
+            ]);
+        } catch (Throwable $e) {
+            // Segue com renovação da sessão PHP
+        }
+    }
+
+    if ($isRemember) {
+        set_auth_cookie(session_name(), session_id(), $targetExp);
+        $rawToken = (string) ($_COOKIE[SICE_AUTH_COOKIE] ?? '');
+        if ($rawToken !== '') {
+            set_auth_cookie(SICE_AUTH_COOKIE, $rawToken, $targetExp);
+        }
+    }
+
+    return [
+        'expiresIn'  => max(0, $targetExp - $now),
+        'serverTime' => $now,
+    ];
 }
 
 /**
