@@ -1746,7 +1746,7 @@ h2 {
   font-size: 7px;
 }
 .inventory-categories {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 .inventory-categories strong {
   font-size: 18px;
@@ -1766,6 +1766,9 @@ h2 {
 }
 .category-accent--5 {
   background: #8b8073;
+}
+.category-accent--6 {
+  background: #b08a4e;
 }
 .inventory-toolbar {
   min-height: 69px;

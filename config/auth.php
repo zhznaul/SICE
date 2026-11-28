@@ -198,6 +198,8 @@ function fetch_app_state(array $user): array
             ?? ($row['catalog_type'] !== null ? (string) $row['catalog_type'] : null);
         $isDistilled = ($resolvedCatalogType === 'distilled');
         $isDisposable = ($resolvedCatalogType === 'disposable');
+        $isNonPerishable = ($resolvedCatalogType === 'non_perishable');
+        $hasNoDates = $isDisposable || $isNonPerishable;
         $shelfLifeDays = $row['shelf_life_after_opening_days'] !== null ? (int) $row['shelf_life_after_opening_days'] : null;
         $openedExpiry = $row['opened_expiry_date'];
         if ($resolvedCatalogType === 'syrup' && $row['package_status'] === 'opened' && $openedExpiry === null && $row['handled_at'] !== null && $shelfLifeDays !== null) {
@@ -216,9 +218,9 @@ function fetch_app_state(array $user): array
             'minimumStock'              => (float) $row['minimum_stock'],
             'expiry'                    => $isDisposable ? null : $row['expiry'],
             'purchasedAt'               => $row['purchased_at'],
-            'manufacturedAt'            => $isDisposable ? null : $row['manufactured_at'],
-            'handledAt'                 => $isDisposable ? null : $row['handled_at'],
-            'expiryDate'                => ($isDistilled || $isDisposable) ? null : $row['expiry_date'],
+            'manufacturedAt'            => $hasNoDates ? null : $row['manufactured_at'],
+            'handledAt'                 => $hasNoDates ? null : $row['handled_at'],
+            'expiryDate'                => ($isDistilled || $hasNoDates) ? null : $row['expiry_date'],
             'expiryIndeterminate'       => $isDistilled || (bool) ((int) ($row['expiry_indeterminate'] ?? 0)),
             'packageStatus'             => $resolvedCatalogType === 'syrup' ? ($row['package_status'] ?: 'closed') : null,
             'shelfLifeAfterOpeningDays' => $resolvedCatalogType === 'syrup' ? $shelfLifeDays : null,

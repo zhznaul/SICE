@@ -1161,6 +1161,10 @@ try {
                     // Exclusivamente identificação e controle de estoque (sem datas)
                     break;
 
+                case 'non_perishable':
+                    // Insumos secos: identificação e controle de estoque, sem datas de validade
+                    break;
+
                 case 'soft':
                     if (!$manufacturedAt) {
                         respond(['ok' => false, 'error' => 'Informe a data de fabricação para etiqueta de produto Soft.']);

@@ -22,6 +22,7 @@
     soft: 'Soft',
     syrup: 'Xaropes',
     disposable: 'Descartáveis',
+    non_perishable: 'Não perecível',
   };
 
   const BEVERAGE_CLASSIFICATIONS = ['distilled', 'soft', 'syrup'];
@@ -31,6 +32,7 @@
     'Laticínios e frios': 'perishable',
     Hortifrutti: 'perishable',
     'Materiais descartáveis': 'disposable',
+    'Insumos secos': 'non_perishable',
   };
 
   const PACKAGE_STATUS_LABELS = {
@@ -44,6 +46,7 @@
     'Laticínios e frios',
     'Bebidas',
     'Materiais descartáveis',
+    'Insumos secos',
   ];
 
   const UNITS = ['kg', 'g', 'un', 'l', 'ml', 'caixa', 'fardo'];
@@ -108,6 +111,9 @@
     if (lower === 'carnes e pescados') return 'Carnes e pescados';
     if (lower === 'laticínios e frios' || lower === 'laticinios e frios') return 'Laticínios e frios';
     if (lower === 'bebidas') return 'Bebidas';
+    if (lower === 'insumos secos' || lower === 'insumo seco' || lower === 'secos' || lower === 'seco') {
+      return 'Insumos secos';
+    }
     if (lower === 'materiais descartáveis' || lower === 'materiais descartaveis') {
       return 'Materiais descartáveis';
     }
@@ -122,6 +128,9 @@
     const reference = `${product?.name || ''} ${product?.category || ''}`.toLowerCase();
     if (/bebida|gin|vinho|cerveja|whisky|vodka|rum|suco|água|refrigerante|xarope|syrup|tônica|energético/.test(reference)) {
       return 'Bebidas';
+    }
+    if (/arroz|farinha|feij[aã]o|macarr[aã]o|a[cç][uú]car|fub[aá]|aveia|leite (em p[oó]|uht|longa vida)/.test(reference)) {
+      return 'Insumos secos';
     }
     if (/descart|guardanapo|canudo|embalagem|sacola|copo|luva|papel/.test(reference)) {
       return 'Materiais descartáveis';
@@ -221,6 +230,18 @@
           expiryAlertEligible: false,
           disposableControl: true,
         };
+      case 'non_perishable':
+        return {
+          code: 'non_perishable',
+          label: 'Não perecível',
+          hasExpiry: false,
+          expiryIndeterminate: false,
+          usesManufacturedAt: false,
+          usesHandledAt: false,
+          supportsOpenClose: false,
+          expiryAlertEligible: false,
+          disposableControl: false,
+        };
       default:
         return {
           code: 'perishable',
@@ -257,6 +278,18 @@
         label: 'VALIDADE',
         displayText: 'Indeterminada',
         shortText: 'Indeterminada',
+        effectiveDate: null,
+        openedExpiryDate: null,
+        needsShelfLifeConfig: false,
+      };
+    }
+
+    if (cls === 'non_perishable') {
+      return {
+        mode: 'none',
+        label: 'CONTROLE',
+        displayText: 'Não perecível · sem validade',
+        shortText: 'Não perecível',
         effectiveDate: null,
         openedExpiryDate: null,
         needsShelfLifeConfig: false,
@@ -2010,7 +2043,7 @@
             </div>
           </div>
           <div class="classification-report-list">
-            ${['perishable', 'distilled', 'soft', 'syrup', 'disposable']
+            ${['perishable', 'distilled', 'soft', 'syrup', 'disposable', 'non_perishable']
               .map((clsKey) => {
                 const items = state.products.filter((p) => getProductClassification(p) === clsKey);
                 const val = items.reduce((s, p) => s + Number(p.quantity) * Number(p.unitCost || 0), 0);
@@ -2022,6 +2055,7 @@
                   const closedCount = items.length - openedCount;
                   note = `${closedCount} fechado(s) · ${openedCount} aberto(s)`;
                 } else if (clsKey === 'disposable') note = 'Controle exclusivo de estoque · sem validade';
+                else if (clsKey === 'non_perishable') note = 'Insumos secos · sem validade e sem alerta de vencimento';
                 return `
                   <div class="responsible-row">
                     <span>
@@ -2182,7 +2216,7 @@
     state.labelManufacturedAt = product.manufacturedAt ? String(product.manufacturedAt).slice(0, 10) : '';
     state.labelHandledAt = product.handledAt ? String(product.handledAt).slice(0, 10) : '';
     state.labelExpiryDate =
-      cls === 'distilled' || cls === 'disposable'
+      cls === 'distilled' || cls === 'disposable' || cls === 'non_perishable'
         ? ''
         : product.expiryDate
           ? String(product.expiryDate).slice(0, 10)
@@ -2214,6 +2248,16 @@
     const lines = [];
     if (cls === 'disposable') {
       lines.push({ prefix: 'Classificação:', value: 'Descartáveis', emphasis: 'normal' });
+      lines.push({ prefix: 'Quantidade:', value: displayQuantity, emphasis: 'normal' });
+      if (product?.location) {
+        lines.push({ prefix: 'Local:', value: product.location, emphasis: 'normal' });
+      }
+      if (lot) {
+        lines.push({ prefix: 'Lote:', value: lot, emphasis: 'normal' });
+      }
+      lines.push({ prefix: 'Resp.:', value: resp || '—', emphasis: 'muted' });
+    } else if (cls === 'non_perishable') {
+      lines.push({ prefix: 'Classificação:', value: 'Não perecível', emphasis: 'normal' });
       lines.push({ prefix: 'Quantidade:', value: displayQuantity, emphasis: 'normal' });
       if (product?.location) {
         lines.push({ prefix: 'Local:', value: product.location, emphasis: 'normal' });
@@ -2337,6 +2381,13 @@
         <div class="form-info-note full-width">
           ${icon('check', 16)}
           <span><strong>Destilados:</strong> validade indeterminada. A etiqueta exibirá <em>Validade: Indeterminada</em>, sem data de validade ou manipulação.</span>
+        </div>
+      `;
+    } else if (cls === 'non_perishable') {
+      dynamicDateFields = `
+        <div class="form-info-note full-width">
+          ${icon('boxes', 16)}
+          <span><strong>Não perecível (insumos secos):</strong> etiqueta de identificação e controle de estoque, sem campos de fabricação, manipulação ou validade.</span>
         </div>
       `;
     } else if (cls === 'disposable') {
@@ -2773,7 +2824,7 @@
     if (state.labelLot.trim()) payload.lot = state.labelLot.trim();
     if (cls === 'distilled') {
       payload.expiry = 'Indeterminada';
-    } else if (cls === 'disposable') {
+    } else if (cls === 'disposable' || cls === 'non_perishable') {
       payload.location = product.location;
     } else if (cls === 'soft') {
       payload.manufacturedAt = state.labelManufacturedAt;
@@ -3369,7 +3420,28 @@
     }
 
     let controlFields = '';
-    if (effectiveType === 'disposable') {
+    if (effectiveType === 'non_perishable') {
+      controlFields = `
+        <div class="form-info-note full-width">
+          ${icon('boxes', 16)}
+          <span><strong>Não perecível:</strong> insumos secos não possuem validade, fabricação ou manipulação e não geram alertas de vencimento.</span>
+        </div>
+        ${
+          mode === 'create'
+            ? `
+          <label class="form-field">
+            <span>Data da compra</span>
+            <input name="purchasedAt" type="date" value="${esc(purchasedAt)}">
+          </label>
+        `
+            : ''
+        }
+        <label class="form-field ${mode === 'edit' ? 'full-width' : ''}">
+          <span>Observação</span>
+          <input name="expiry" value="${esc(expiry)}" placeholder="Ex.: armazenar em local seco e arejado">
+        </label>
+      `;
+    } else if (effectiveType === 'disposable') {
       controlFields = `
         <div class="form-info-note full-width">
           ${icon('boxes', 16)}
@@ -3538,6 +3610,14 @@
         </div>
       `;
     }
+    if (cls === 'non_perishable') {
+      return `
+        <div class="form-info-note full-width">
+          ${icon('boxes', 16)}
+          <span><strong>Não perecível:</strong> insumos secos, sem controle de validade ou fabricação.</span>
+        </div>
+      `;
+    }
     let html = '';
     if (rules.usesManufacturedAt) {
       html += `
@@ -3585,6 +3665,30 @@
         <div>
           <span>Validade</span>
           <strong>Indeterminada</strong>
+        </div>
+        <div>
+          <span>Comprado em</span>
+          <strong>${esc(formatDate(purchaseDate))}</strong>
+        </div>
+        <div>
+          <span>Localização</span>
+          <strong>${esc(product.location)}</strong>
+        </div>
+        <div>
+          <span>Último fornecedor</span>
+          <strong>${esc(lastEntry?.supplier || 'Não informado')}</strong>
+        </div>
+        ${canManage ? `<div><span>Custo unitário</span><strong>${esc(money(product.unitCost || 0))}</strong></div>` : ''}
+      `;
+    } else if (cls === 'non_perishable') {
+      detailItemsHtml = `
+        <div>
+          <span>Classificação</span>
+          <strong>${esc(classLabel)}</strong>
+        </div>
+        <div>
+          <span>Validade</span>
+          <strong>Não perecível</strong>
         </div>
         <div>
           <span>Comprado em</span>
@@ -3729,6 +3833,16 @@
             <strong>Validade indeterminada</strong>
           </div>
           <small>Destilados não geram alertas de vencimento nem exigem data de validade.</small>
+        </div>
+      `;
+    } else if (cls === 'non_perishable') {
+      orientationCardHtml = `
+        <div class="lot-card lot-card--neutral">
+          <div>
+            <span>Controle de validade</span>
+            <strong>Insumo seco · não perecível</strong>
+          </div>
+          <small>Insumos secos não geram alertas de vencimento. O controle é feito por saldo mínimo, entradas e baixas.</small>
         </div>
       `;
     } else if (cls === 'disposable') {
