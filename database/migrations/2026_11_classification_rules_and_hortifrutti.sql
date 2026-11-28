@@ -188,3 +188,16 @@ UPDATE `inventory_products`
 SET `expiry_indeterminate` = 1,
     `expiry_date` = NULL
 WHERE `catalog_type` = 'distilled';
+
+UPDATE `inventory_products`
+SET `status` = CASE
+      WHEN `quantity` <= 0 THEN 'critical'
+      WHEN `quantity` <= `minimum_stock` THEN 'low'
+      ELSE 'ok'
+    END,
+    `accent` = CASE
+      WHEN `quantity` <= 0 THEN '#a54e44'
+      WHEN `quantity` <= `minimum_stock` THEN '#b67c33'
+      ELSE '#376759'
+    END
+WHERE `catalog_type` IN ('distilled', 'disposable');

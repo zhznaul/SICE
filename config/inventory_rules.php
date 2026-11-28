@@ -222,14 +222,15 @@ function normalize_product_control_fields(
 
     $shelfLifeRaw = $input['shelfLifeAfterOpeningDays'] ?? null;
     $shelfLifeDays = null;
-    if ($shelfLifeRaw !== null && $shelfLifeRaw !== '') {
-        if (!is_numeric($shelfLifeRaw) || (int) $shelfLifeRaw <= 0) {
+    if ($shelfLifeRaw !== null && trim((string) $shelfLifeRaw) !== '') {
+        $shelfStr = trim((string) $shelfLifeRaw);
+        if (!ctype_digit($shelfStr) || (int) $shelfStr <= 0) {
             return [
                 'ok'    => false,
                 'error' => 'O prazo de utilização após abertura deve ser um número inteiro de dias maior que zero.',
             ];
         }
-        $shelfLifeDays = (int) $shelfLifeRaw;
+        $shelfLifeDays = (int) $shelfStr;
     }
 
     $packageStatusRaw = strtolower(trim((string) ($input['packageStatus'] ?? '')));
@@ -503,10 +504,10 @@ function ensure_inventory_schema(PDO $pdo): void
         }
 
         $colStmt = $pdo->prepare(
-            'SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+            'SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE
              FROM information_schema.COLUMNS
              WHERE TABLE_SCHEMA = :db
-               AND TABLE_NAME IN (\'inventory_products\', \'inventory_movements\', \'inventory_labels\')'
+               AND TABLE_NAME IN (\'inventory_products\', \'inventory_movements\', \'inventory_labels\', \'purchase_orders\')'
         );
         $colStmt->execute([':db' => $dbName]);
         $columns = [];
@@ -602,6 +603,28 @@ function ensure_inventory_schema(PDO $pdo): void
             $pdo->exec('ALTER TABLE `inventory_labels` ADD COLUMN `expiry_indeterminate` TINYINT(1) NOT NULL DEFAULT 0 AFTER `package_status`');
         }
 
+        // 4b. Atualização segura de unidades de medida (litros -> l, + ml, + fardo; etiquetas + FARDO, + CAIXA)
+        $prodUnitType = strtolower((string) ($prodCols['unit']['COLUMN_TYPE'] ?? ''));
+        if ($prodUnitType !== '' && (!str_contains($prodUnitType, "'fardo'") || !str_contains($prodUnitType, "'ml'") || str_contains($prodUnitType, "'litros'"))) {
+            $pdo->exec("ALTER TABLE `inventory_products` MODIFY COLUMN `unit` ENUM('kg', 'g', 'un', 'litros', 'l', 'ml', 'caixa', 'fardo') NOT NULL DEFAULT 'un'");
+            $pdo->exec("UPDATE `inventory_products` SET `unit` = 'l' WHERE `unit` = 'litros'");
+            $pdo->exec("ALTER TABLE `inventory_products` MODIFY COLUMN `unit` ENUM('kg', 'g', 'un', 'l', 'ml', 'caixa', 'fardo') NOT NULL DEFAULT 'un'");
+        }
+        $pdo->exec("UPDATE `inventory_movements` SET `unit` = 'l' WHERE `unit` = 'litros'");
+
+        $ordCols = $columns['purchase_orders'] ?? [];
+        $ordUnitType = strtolower((string) ($ordCols['unit']['COLUMN_TYPE'] ?? ''));
+        if ($ordUnitType !== '' && (!str_contains($ordUnitType, "'fardo'") || !str_contains($ordUnitType, "'ml'") || str_contains($ordUnitType, "'litros'"))) {
+            $pdo->exec("ALTER TABLE `purchase_orders` MODIFY COLUMN `unit` ENUM('kg', 'g', 'un', 'litros', 'l', 'ml', 'caixa', 'fardo') NOT NULL DEFAULT 'un'");
+            $pdo->exec("UPDATE `purchase_orders` SET `unit` = 'l' WHERE `unit` = 'litros'");
+            $pdo->exec("ALTER TABLE `purchase_orders` MODIFY COLUMN `unit` ENUM('kg', 'g', 'un', 'l', 'ml', 'caixa', 'fardo') NOT NULL DEFAULT 'un'");
+        }
+
+        $lblUnitType = strtoupper((string) ($lblCols['unit']['COLUMN_TYPE'] ?? ''));
+        if ($lblUnitType !== '' && (!str_contains($lblUnitType, "'FARDO'") || !str_contains($lblUnitType, "'CAIXA'"))) {
+            $pdo->exec("ALTER TABLE `inventory_labels` MODIFY COLUMN `unit` ENUM('UN', 'KG', 'G', 'L', 'ML', 'FARDO', 'CAIXA') NOT NULL DEFAULT 'UN'");
+        }
+
         // 5. Migração idempotente de dados legados (Hortifrúti -> Hortifrutti e classificações)
         $pdo->exec(
             "UPDATE `inventory_products`
@@ -669,6 +692,20 @@ function ensure_inventory_schema(PDO $pdo): void
                  `expiry_date` = NULL
              WHERE `catalog_type` = 'distilled'
                AND (`expiry_indeterminate` <> 1 OR `expiry_date` IS NOT NULL)"
+        );
+        $pdo->exec(
+            "UPDATE `inventory_products`
+             SET `status` = CASE
+                   WHEN `quantity` <= 0 THEN 'critical'
+                   WHEN `quantity` <= `minimum_stock` THEN 'low'
+                   ELSE 'ok'
+                 END,
+                 `accent` = CASE
+                   WHEN `quantity` <= 0 THEN '#a54e44'
+                   WHEN `quantity` <= `minimum_stock` THEN '#b67c33'
+                   ELSE '#376759'
+                 END
+             WHERE `catalog_type` IN ('distilled', 'disposable')"
         );
     } catch (Throwable $e) {
         // Não bloqueia a aplicação caso o usuário do banco não tenha privilégios de DDL

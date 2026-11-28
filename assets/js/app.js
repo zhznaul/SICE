@@ -46,8 +46,8 @@
     'Materiais descartáveis',
   ];
 
-  const UNITS = ['kg', 'g', 'un', 'litros', 'caixa'];
-  const LABEL_UNITS = ['UN', 'KG', 'G', 'L', 'ML'];
+  const UNITS = ['kg', 'g', 'un', 'l', 'ml', 'caixa', 'fardo'];
+  const LABEL_UNITS = ['UN', 'KG', 'G', 'L', 'ML', 'FARDO', 'CAIXA'];
   const INVENTORY_CODE_FORMATS = ['qr_code', 'ean_13', 'ean_8', 'code_128', 'upc_a', 'upc_e'];
 
   const SEASONALITY = {
@@ -592,6 +592,14 @@
         applyAppState(result.data);
       } else {
         await reloadState();
+      }
+      if ((action === 'updateSyrupState' || action === 'updateProduct') && state.labelProductId) {
+        const syncedProd = state.products.find(
+          (p) => p.active !== false && String(p.id) === String(state.labelProductId)
+        );
+        if (syncedProd) {
+          syncLabelDefaultsForProduct(syncedProd);
+        }
       }
       render();
     } else {
@@ -2160,7 +2168,16 @@
   function syncLabelDefaultsForProduct(product) {
     if (!product) return;
     const cls = getProductClassification(product);
-    const unitMap = { un: 'UN', kg: 'KG', g: 'G', litros: 'L', caixa: 'UN' };
+    const unitMap = {
+      un: 'UN',
+      kg: 'KG',
+      g: 'G',
+      l: 'L',
+      litros: 'L',
+      ml: 'ML',
+      caixa: 'CAIXA',
+      fardo: 'FARDO',
+    };
     state.labelUnit = unitMap[product.unit] || state.labelUnit || 'UN';
     state.labelManufacturedAt = product.manufacturedAt ? String(product.manufacturedAt).slice(0, 10) : '';
     state.labelHandledAt = product.handledAt ? String(product.handledAt).slice(0, 10) : '';
@@ -2297,11 +2314,12 @@
 
   function labelsHtml() {
     const activeProducts = state.products.filter((p) => p.active !== false);
-    if (!state.labelProductId && activeProducts[0]) {
+    let product = activeProducts.find((p) => String(p.id) === String(state.labelProductId));
+    if (!product && activeProducts[0]) {
       state.labelProductId = String(activeProducts[0].id);
-      syncLabelDefaultsForProduct(activeProducts[0]);
+      product = activeProducts[0];
+      syncLabelDefaultsForProduct(product);
     }
-    const product = activeProducts.find((p) => String(p.id) === String(state.labelProductId));
     const model = buildLabelModel(product);
     const cls = model.cls;
     const pkgStatus = model.pkgStatus;
@@ -2363,11 +2381,11 @@
         `;
       } else {
         const limitBanner = model.needsShelfLifeConfig
-          ? `<div class="form-warning-note full-width">
+          ? `<div id="label-syrup-limit-banner" class="form-warning-note full-width">
               ${icon('triangle-alert', 16)}
               <span><strong>Prazo após abertura não configurado:</strong> cadastre a quantidade de dias de utilização após abertura nos detalhes deste xarope. Nenhuma data fictícia será gerada.</span>
             </div>`
-          : `<div class="form-info-note full-width">
+          : `<div id="label-syrup-limit-banner" class="form-info-note full-width">
               ${icon('calendar-clock', 16)}
               <span><strong>Limite após abertura (${model.shelfDays} dias):</strong> ${model.openedExpiry ? `<strong>${esc(formatDate(model.openedExpiry))}</strong>` : 'informe a data de manipulação para calcular'}${product?.expiryDate ? ` · Validade original (fechado): ${esc(formatDate(product.expiryDate))}` : ''}</span>
             </div>`;
@@ -3312,10 +3330,14 @@
   } = {}) {
     const normCat = normalizeCategoryName(category);
     const isBeverage = normCat === 'Bebidas';
+    const isUnclassifiedLegacyBeverage =
+      isBeverage && mode === 'edit' && !BEVERAGE_CLASSIFICATIONS.includes(catalogType);
     const effectiveType = isBeverage
       ? BEVERAGE_CLASSIFICATIONS.includes(catalogType)
         ? catalogType
-        : 'distilled'
+        : isUnclassifiedLegacyBeverage
+          ? ''
+          : 'distilled'
       : resolveCatalogType(normCat, catalogType) || 'perishable';
     const pkgStatus = packageStatus === 'opened' ? 'opened' : 'closed';
     const today = new Date().toISOString().slice(0, 10);
@@ -3326,6 +3348,7 @@
         <label class="form-field">
           <span>Classificação</span>
           <select name="catalogType" data-product-dynamic="catalogType" required>
+            ${isUnclassifiedLegacyBeverage ? '<option value="" disabled selected>Selecione a classificação</option>' : ''}
             <option value="distilled" ${effectiveType === 'distilled' ? 'selected' : ''}>Destilados</option>
             <option value="soft" ${effectiveType === 'soft' ? 'selected' : ''}>Soft</option>
             <option value="syrup" ${effectiveType === 'syrup' ? 'selected' : ''}>Xaropes</option>
@@ -4564,6 +4587,61 @@
     }
   });
 
+  function updateProductSyrupLimitPreview(form) {
+    if (!form) return;
+    const previewEl = form.querySelector('[data-syrup-limit-preview]');
+    if (!previewEl) return;
+    const handledVal = form.querySelector('input[name="handledAt"]')?.value || '';
+    const daysVal = form.querySelector('input[name="shelfLifeAfterOpeningDays"]')?.value || '';
+    const daysNum = Number(daysVal);
+    const limit = calculateOpenedExpiryDate(
+      handledVal,
+      Number.isInteger(daysNum) && daysNum > 0 ? daysNum : null
+    );
+    if (limit) {
+      previewEl.className = 'form-info-note full-width';
+      previewEl.innerHTML = `${icon('calendar-clock', 16)}<span><strong>Limite após abertura:</strong> ${esc(formatDate(limit))} (${esc(daysNum)} dias a partir da manipulação).</span>`;
+    } else {
+      previewEl.className = 'form-warning-note full-width';
+      previewEl.innerHTML = `${icon('triangle-alert', 16)}<span><strong>Prazo após abertura não definido:</strong> informe a quantidade de dias após abertura para calcular o limite, sem gerar data fictícia.</span>`;
+    }
+    refreshIcons();
+  }
+
+  function refreshLabelDerivedUi(key, value) {
+    if (key === 'labelHandledAt') {
+      const expInput = document.querySelector('input[name="expiryDate"][data-label-field]');
+      if (expInput) expInput.min = value || '';
+    }
+    if (key === 'labelManufacturedAt') {
+      const expInput = document.querySelector('input[name="expiryDate"][data-label-field]');
+      if (expInput) expInput.min = value || '';
+      const handInput = document.querySelector('input[name="handledAt"][data-label-field]');
+      if (handInput) handInput.min = value || '';
+    }
+    const activeProducts = state.products.filter((p) => p.active !== false);
+    const product = activeProducts.find((p) => String(p.id) === String(state.labelProductId));
+    const banner = document.getElementById('label-syrup-limit-banner');
+    if (banner && product) {
+      const model = buildLabelModel(product);
+      if (model.cls === 'syrup' && model.pkgStatus === 'opened') {
+        if (model.needsShelfLifeConfig) {
+          banner.className = 'form-warning-note full-width';
+          banner.innerHTML = `${icon('triangle-alert', 16)}<span><strong>Prazo após abertura não configurado:</strong> cadastre a quantidade de dias de utilização após abertura nos detalhes deste xarope. Nenhuma data fictícia será gerada.</span>`;
+        } else {
+          banner.className = 'form-info-note full-width';
+          banner.innerHTML = `${icon('calendar-clock', 16)}<span><strong>Limite após abertura (${model.shelfDays} dias):</strong> ${model.openedExpiry ? `<strong>${esc(formatDate(model.openedExpiry))}</strong>` : 'informe a data de manipulação para calcular'}${product.expiryDate ? ` · Validade original (fechado): ${esc(formatDate(product.expiryDate))}` : ''}</span>`;
+        }
+      }
+    }
+    const preview = document.getElementById('label-preview-card');
+    if (preview) {
+      preview.innerHTML = labelPreviewInnerHtml(product);
+      refreshIcons();
+      fitLabelTitle();
+    }
+  }
+
   root.addEventListener('input', (event) => {
     const el = event.target;
     if (el.id === 'global-search-input') {
@@ -4596,24 +4674,7 @@
       const form = el.closest('form[data-product-form]');
       const field = el.getAttribute('data-product-dynamic');
       if (form && (field === 'shelfLifeAfterOpeningDays' || field === 'handledAt')) {
-        const previewEl = form.querySelector('[data-syrup-limit-preview]');
-        if (previewEl) {
-          const handledVal = form.querySelector('input[name="handledAt"]')?.value || '';
-          const daysVal = form.querySelector('input[name="shelfLifeAfterOpeningDays"]')?.value || '';
-          const daysNum = Number(daysVal);
-          const limit = calculateOpenedExpiryDate(
-            handledVal,
-            Number.isInteger(daysNum) && daysNum > 0 ? daysNum : null
-          );
-          if (limit) {
-            previewEl.className = 'form-info-note full-width';
-            previewEl.innerHTML = `${icon('calendar-clock', 16)}<span><strong>Limite após abertura:</strong> ${esc(formatDate(limit))} (${esc(daysNum)} dias a partir da manipulação).</span>`;
-          } else {
-            previewEl.className = 'form-warning-note full-width';
-            previewEl.innerHTML = `${icon('triangle-alert', 16)}<span><strong>Prazo após abertura não definido:</strong> informe a quantidade de dias após abertura para calcular o limite, sem gerar data fictícia.</span>`;
-          }
-          refreshIcons();
-        }
+        updateProductSyrupLimitPreview(form);
       }
       return;
     }
@@ -4622,24 +4683,7 @@
       state[key] = el.value;
       state.labelQr = '';
       state.labelPng = '';
-      if (key === 'labelHandledAt') {
-        const expInput = document.querySelector('input[name="expiryDate"][data-label-field]');
-        if (expInput) expInput.min = el.value || '';
-      }
-      if (key === 'labelManufacturedAt') {
-        const expInput = document.querySelector('input[name="expiryDate"][data-label-field]');
-        if (expInput) expInput.min = el.value || '';
-        const handInput = document.querySelector('input[name="handledAt"][data-label-field]');
-        if (handInput) handInput.min = el.value || '';
-      }
-      const activeProducts = state.products.filter((p) => p.active !== false);
-      const product = activeProducts.find((p) => String(p.id) === String(state.labelProductId));
-      const preview = document.getElementById('label-preview-card');
-      if (preview) {
-        preview.innerHTML = labelPreviewInnerHtml(product);
-        refreshIcons();
-        fitLabelTitle();
-      }
+      refreshLabelDerivedUi(key, el.value);
     }
   });
 
@@ -4662,6 +4706,10 @@
     if (el.hasAttribute('data-product-dynamic')) {
       const form = el.closest('form[data-product-form]');
       const field = el.getAttribute('data-product-dynamic');
+      if (form && (field === 'shelfLifeAfterOpeningDays' || field === 'handledAt')) {
+        updateProductSyrupLimitPreview(form);
+        return;
+      }
       if (form && (field === 'category' || field === 'catalogType' || field === 'packageStatus')) {
         const mode = form.getAttribute('data-product-form') || 'create';
         const container = form.querySelector('[data-product-dynamic-container]');
@@ -4779,12 +4827,7 @@
         render();
         return;
       }
-      const preview = document.getElementById('label-preview-card');
-      if (preview) {
-        preview.innerHTML = labelPreviewInnerHtml(product);
-        refreshIcons();
-        fitLabelTitle();
-      }
+      refreshLabelDerivedUi(key, el.value);
     }
   });
 

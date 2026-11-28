@@ -54,8 +54,12 @@ function post_date(string $key): ?string
 
 function valid_unit(string $unit): string
 {
-    $allowed = ['kg', 'g', 'un', 'litros', 'caixa'];
-    return in_array($unit, $allowed, true) ? $unit : 'un';
+    $norm = strtolower(trim($unit));
+    if ($norm === 'litros') {
+        $norm = 'l';
+    }
+    $allowed = ['kg', 'g', 'un', 'l', 'ml', 'caixa', 'fardo'];
+    return in_array($norm, $allowed, true) ? $norm : 'un';
 }
 
 function signed_qty(string $type, float $qty): float
@@ -65,10 +69,18 @@ function signed_qty(string $type, float $qty): float
 
 function convert_to_product_unit(float $qty, string $movUnit, string $prodUnit): float
 {
-    if ($movUnit === 'g' && $prodUnit === 'kg') {
+    $m = $movUnit === 'litros' ? 'l' : $movUnit;
+    $p = $prodUnit === 'litros' ? 'l' : $prodUnit;
+    if ($m === 'g' && $p === 'kg') {
         return $qty / 1000.0;
     }
-    if ($movUnit === 'kg' && $prodUnit === 'g') {
+    if ($m === 'kg' && $p === 'g') {
+        return $qty * 1000.0;
+    }
+    if ($m === 'ml' && $p === 'l') {
+        return $qty / 1000.0;
+    }
+    if ($m === 'l' && $p === 'ml') {
         return $qty * 1000.0;
     }
     return $qty;
@@ -827,6 +839,10 @@ try {
             $rules = classification_rules($prodClass);
             $newManufacturedAt = $rules['usesManufacturedAt'] ? post_date('manufacturedAt') : null;
             $newExpiry = $rules['hasExpiry'] ? post_date('expiryDate') : null;
+            if ($newManufacturedAt !== null && $newExpiry !== null && $newExpiry < $newManufacturedAt) {
+                $pdo->rollBack();
+                respond(['ok' => false, 'error' => 'A data de validade não pode ser anterior à data de fabricação.']);
+            }
             $effectiveCtx = array_merge($prod, [
                 'catalog_type' => $prodClass,
                 'expiry_date'  => $rules['hasExpiry'] ? ($newExpiry ?: ($prod['expiry_date'] ?: null)) : null,
@@ -1097,7 +1113,7 @@ try {
         case 'createLabel': {
             $productId = (int) post_text('product', 20);
             $quantity = post_number('quantity');
-            $unit = post_text('unit', 10);
+            $unit = strtoupper(post_text('unit', 16));
             $manufacturedAt = post_date('manufacturedAt');
             $handledAt = post_date('handledAt');
             $expiryDate = post_date('expiryDate');
@@ -1105,7 +1121,7 @@ try {
             $responsibleName = post_text('responsibleName', 120);
             $requestedPkgStatus = strtolower(post_text('packageStatus', 20));
 
-            if ($productId <= 0 || $quantity === null || $quantity <= 0 || !in_array($unit, ['UN', 'KG', 'G', 'L', 'ML'], true) || $responsibleName === '') {
+            if ($productId <= 0 || $quantity === null || $quantity <= 0 || !in_array($unit, ['UN', 'KG', 'G', 'L', 'ML', 'FARDO', 'CAIXA'], true) || $responsibleName === '') {
                 respond(['ok' => false, 'error' => 'Preencha insumo, quantidade, unidade e responsável.']);
             }
 
@@ -1229,7 +1245,11 @@ try {
                 ':responsible_name'     => $responsibleName,
                 ':created_by'           => $user['id'],
             ]);
-            respond_with_state($user, 'Etiqueta criada e guardada.');
+            $labelMsg = 'Etiqueta criada e guardada.';
+            if ($catalogType === 'syrup' && $labelPackageStatus === 'opened' && $labelOpenedExpiryDate === null) {
+                $labelMsg = 'Etiqueta criada. Atenção: defina o prazo após abertura deste xarope para calcular a data limite.';
+            }
+            respond_with_state($user, $labelMsg);
         }
 
         // -------------------------------------------------------------------
