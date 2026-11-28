@@ -12,7 +12,6 @@ const SICE_CATEGORIES = [
     'Laticínios e frios',
     'Bebidas',
     'Materiais descartáveis',
-    'Insumos secos',
 ];
 
 const SICE_AUTO_CLASSIFICATIONS = [
@@ -20,7 +19,6 @@ const SICE_AUTO_CLASSIFICATIONS = [
     'Laticínios e frios'     => 'perishable',
     'Hortifrutti'            => 'perishable',
     'Materiais descartáveis' => 'disposable',
-    'Insumos secos'          => 'non_perishable',
 ];
 
 const SICE_BEVERAGE_CLASSIFICATIONS = ['distilled', 'soft', 'syrup'];
@@ -31,7 +29,6 @@ const SICE_CLASSIFICATION_LABELS = [
     'soft'       => 'Soft',
     'syrup'      => 'Xaropes',
     'disposable' => 'Descartáveis',
-    'non_perishable' => 'Não perecível',
 ];
 
 /**
@@ -58,9 +55,6 @@ function normalize_inventory_category(?string $raw): string
     }
     if ($lower === 'bebidas') {
         return 'Bebidas';
-    }
-    if (in_array($lower, ['insumos secos', 'insumo seco', 'secos', 'seco'], true)) {
-        return 'Insumos secos';
     }
     if (in_array($lower, ['materiais descartáveis', 'materiais descartaveis', 'descartáveis', 'descartaveis'], true)) {
         return 'Materiais descartáveis';
@@ -149,17 +143,6 @@ function classification_rules(?string $catalogType): array
             'supportsOpenClose'    => false,
             'expiryAlertEligible'  => false,
             'disposableControl'    => true,
-        ],
-        'non_perishable' => [
-            'code'                 => 'non_perishable',
-            'label'                => 'Não perecível',
-            'hasExpiry'            => false,
-            'expiryIndeterminate'  => false,
-            'usesManufacturedAt'   => false,
-            'usesHandledAt'        => false,
-            'supportsOpenClose'    => false,
-            'expiryAlertEligible'  => false,
-            'disposableControl'    => false,
         ],
         default => [
             'code'                 => 'perishable',
@@ -289,25 +272,6 @@ function normalize_product_control_fields(
                 ],
             ];
 
-        case 'non_perishable':
-            // Insumos secos são obrigatoriamente não perecíveis: sem validade, fabricação ou manipulação.
-            return [
-                'ok'   => true,
-                'data' => [
-                    'category'                      => $category,
-                    'catalog_type'                  => 'non_perishable',
-                    'purchased_at'                  => $purchasedAt,
-                    'manufactured_at'               => null,
-                    'handled_at'                    => null,
-                    'expiry_date'                   => null,
-                    'expiry_indeterminate'          => 0,
-                    'package_status'                => null,
-                    'shelf_life_after_opening_days' => null,
-                    'opened_expiry_date'            => null,
-                    'expiry'                        => $expiryNotes,
-                ],
-            ];
-
         case 'soft':
             if ($isCreate && $manufacturedAt === null) {
                 return [
@@ -428,7 +392,7 @@ function get_effective_expiry_date(array $product): ?string
     $catalogType = $product['catalog_type'] ?? $product['catalogType'] ?? null;
     $indeterminate = (bool) ($product['expiry_indeterminate'] ?? $product['expiryIndeterminate'] ?? false);
 
-    if ($catalogType === 'distilled' || $catalogType === 'disposable' || $catalogType === 'non_perishable' || $indeterminate) {
+    if ($catalogType === 'distilled' || $catalogType === 'disposable' || $indeterminate) {
         return null;
     }
 
@@ -698,25 +662,6 @@ function ensure_inventory_schema(PDO $pdo): void
         );
         $pdo->exec(
             "UPDATE `inventory_products`
-             SET `category` = 'Insumos secos'
-             WHERE LOWER(TRIM(`category`)) IN ('insumos secos', 'insumo seco', 'secos', 'seco')
-               AND `category` <> 'Insumos secos'"
-        );
-        $pdo->exec(
-            "UPDATE `inventory_products`
-             SET `catalog_type` = 'non_perishable',
-                 `expiry_indeterminate` = 0,
-                 `expiry_date` = NULL,
-                 `manufactured_at` = NULL,
-                 `handled_at` = NULL,
-                 `package_status` = NULL,
-                 `shelf_life_after_opening_days` = NULL,
-                 `opened_expiry_date` = NULL
-             WHERE `category` = 'Insumos secos'
-               AND (`catalog_type` IS NULL OR `catalog_type` <> 'non_perishable' OR `expiry_date` IS NOT NULL)"
-        );
-        $pdo->exec(
-            "UPDATE `inventory_products`
              SET `catalog_type` = 'distilled',
                  `expiry_indeterminate` = 1,
                  `expiry_date` = NULL
@@ -760,7 +705,7 @@ function ensure_inventory_schema(PDO $pdo): void
                    WHEN `quantity` <= `minimum_stock` THEN '#b67c33'
                    ELSE '#376759'
                  END
-             WHERE `catalog_type` IN ('distilled', 'disposable', 'non_perishable')"
+             WHERE `catalog_type` IN ('distilled', 'disposable')"
         );
     } catch (Throwable $e) {
         // Não bloqueia a aplicação caso o usuário do banco não tenha privilégios de DDL
